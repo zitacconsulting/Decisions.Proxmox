@@ -1,0 +1,13 @@
+{
+    "ModuleName": "Zitac",
+    "ModuleDependencies": null,
+    "Version": "1.0.0",
+    "RequiresLicense": false,
+    "Description": "This module adds steps to integrate with Proxmox VE",
+    "CompiledOnDate": "2026-07-01T00:00:00.0000000+00:00",
+    "CompiledOnServer": "KEVI",
+    "ImagePath": "./proxmox.svg",
+    "Installed": false,
+    "InstalledVersion": null,
+    "IsGithubModule": false
+}

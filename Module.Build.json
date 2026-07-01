@@ -1,0 +1,23 @@
+{
+    "Resources": {
+        "NoComponents": true,
+        "CoreServicesDlls": [
+            "./Zitac.Proxmox/bin/Zitac.Proxmox.Steps.dll"
+        ],
+        "ReferenceDlls": null,
+        "CustomImages": [
+            "proxmox.svg"
+        ],
+        "CliDlls": null,
+        "WebPages": null,
+        "SilverlightDlls": null,
+        "AgentDlls": null,
+        "InstallScript": null,
+        "SqlScripts": null,
+        "ObjectsToImport": null,
+        "MsSqlScript": null
+    },
+    "Version": "9.19.0",
+    "ImagePath": "proxmox.svg",
+    "Description": "This module adds steps to integrate with Proxmox VE"
+}
