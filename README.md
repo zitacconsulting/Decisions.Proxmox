@@ -74,7 +74,7 @@ This module provides 31 Decisions workflow steps organized under `Integration/Pr
 
 ### Platform Requirements
 - **Decisions Platform**: Version 9.0 or higher
-- **.NET Runtime**: .NET 9.0
+- **.NET Runtime**: .NET 10.0
 - **Proxmox VE**: Version 7.0 or higher
 
 ### Proxmox Permissions
@@ -157,7 +157,7 @@ Property to select the bus type for new disks: `scsi` (default), `virtio`, `ide`
 ## Building from Source
 
 ### Prerequisites
-- .NET 9.0 SDK
+- .NET 10.0 SDK
 - `CreateDecisionsModule-GlobalTool` dotnet global tool
 
 ### Build Steps
