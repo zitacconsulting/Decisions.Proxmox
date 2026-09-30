@@ -46,7 +46,7 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         new IgnoreInputMapping { InputDataName = "Description" },
         new IgnoreInputMapping { InputDataName = "Tags" },
         new ConstantInputMapping { InputDataName = "CPU Sockets", Value = 1 },
-        new ConstantInputMapping { InputDataName = "OS Type", Value = OsType.Linux },
+        new ConstantInputMapping { InputDataName = "OS Type", Value = OsType.Linux_6x_2_6_Kernel },
         new ConstantInputMapping { InputDataName = "BIOS Type", Value = BiosType.SeaBIOS },
         new ConstantInputMapping { InputDataName = "Network Model", Value = NetworkModel.VirtIO },
         new ConstantInputMapping { InputDataName = "SCSI Controller", Value = ScsiController.VirtIOScsiPci },
@@ -97,7 +97,7 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         var memoryMb = data.Data["Memory (MB)"] as int? ?? 1024;
         var cpuCores = data.Data["CPU Cores"] as int? ?? 1;
         var cpuSockets = data.Data["CPU Sockets"] as int? ?? 1;
-        var osType = (OsType)(data.Data["OS Type"] ?? OsType.Linux);
+        var osType = (OsType)(data.Data["OS Type"] ?? OsType.Linux_6x_2_6_Kernel);
         var biosType = (BiosType)(data.Data["BIOS Type"] ?? BiosType.SeaBIOS);
         var storage = data.Data["Storage"] as string;
         var diskSizeGb = data.Data["Disk Size (GB)"] as int? ?? 32;
@@ -183,12 +183,16 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
 
     private static string MapOsType(OsType osType) => osType switch
     {
-        OsType.Linux                  => "l26",
-        OsType.Windows10_2016_2019    => "win10",
-        OsType.Windows11_2022         => "win11",
-        OsType.Windows8_2012_2012R2   => "win8",
-        OsType.Windows7_2008R2        => "win7",
-        OsType.Windows2008_Vista      => "win2k8",
+        OsType.Linux_6x_2_6_Kernel    => "l26",
+        OsType.Linux_2_4_Kernel       => "l24",
+        OsType.Windows_11_2022_2025   => "win11",
+        OsType.Windows_10_2016_2019   => "win10",
+        OsType.Windows_8x_2012_2012R2 => "win8",
+        OsType.Windows_7_2008R2       => "win7",
+        OsType.Windows_Vista_2008     => "w2k8",
+        OsType.Windows_XP_2003        => "wxp",
+        OsType.Windows_2000           => "w2k",
+        OsType.Solaris_Kernel         => "solaris",
         _                             => "other",
     };
 
