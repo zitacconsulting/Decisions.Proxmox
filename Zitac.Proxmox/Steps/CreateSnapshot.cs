@@ -21,6 +21,12 @@ public class CreateSnapshot : BaseFlowAwareStep, ISyncStep, IDataConsumer, IData
     private bool waitForTask = true;
 
     [WritableValue]
+    private int taskTimeoutSeconds = 1800;
+
+    [WritableValue]
+    private bool showWarningsOutcome;
+
+    [WritableValue]
     private bool includeRAM;
 
     [WritableValue]
@@ -42,11 +48,22 @@ public class CreateSnapshot : BaseFlowAwareStep, ISyncStep, IDataConsumer, IData
     [PropertyClassification(2, "Wait For Task Completion", new string[] { "Settings" })]
     public bool WaitForTask { get { return waitForTask; } set { waitForTask = value; } }
 
-    [PropertyClassification(3, "Include RAM State", new string[] { "Settings" })]
+    [PropertyClassification(3, "Task Timeout (Seconds, 0 = No Limit)", new string[] { "Settings" })]
+    public int TaskTimeoutSeconds { get { return taskTimeoutSeconds; } set { taskTimeoutSeconds = value; } }
+
+    [PropertyClassification(5, "Show Outcome for 'Done With Warnings'", new string[] { "Settings" })]
+    public bool ShowWarningsOutcome
+    {
+        get { return showWarningsOutcome; }
+        set { showWarningsOutcome = value; this.OnPropertyChanged("OutcomeScenarios"); }
+    }
+
+    [PropertyClassification(4, "Include RAM State", new string[] { "Settings" })]
     public bool IncludeRAM { get { return includeRAM; } set { includeRAM = value; } }
 
     public IInputMapping[] DefaultInputs => new IInputMapping[]
     {
+        new IgnoreInputMapping { InputDataName = "Node" },
         new IgnoreInputMapping { InputDataName = "Description" }
     };
 
@@ -62,11 +79,16 @@ public class CreateSnapshot : BaseFlowAwareStep, ISyncStep, IDataConsumer, IData
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Description"),
     };
 
-    public override OutcomeScenarioData[] OutcomeScenarios => new[]
+    public override OutcomeScenarioData[] OutcomeScenarios
     {
-        new OutcomeScenarioData("Done"),
-        new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")),
-    };
+        get
+        {
+            var outcomes = new List<OutcomeScenarioData> { new OutcomeScenarioData("Done") };
+            if (showWarningsOutcome) outcomes.Add(new OutcomeScenarioData("Done With Warnings", new DataDescription(typeof(string), "Warnings", true)));
+            outcomes.Add(new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")));
+            return outcomes.ToArray();
+        }
+    }
 
     public ResultData Run(StepStartData data)
     {
@@ -81,15 +103,19 @@ public class CreateSnapshot : BaseFlowAwareStep, ISyncStep, IDataConsumer, IData
         {
             using var client = new ProxmoxClient(hostname!, port, ignoreSSLErrors);
             client.Authenticate(credentials);
+            if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
 
             var postData = new Dictionary<string, string> { { "snapname", snapName! } };
             if (!string.IsNullOrEmpty(description)) postData["description"] = description;
             if (includeRAM) postData["vmstate"] = "1";
 
             var upid = client.Post($"/nodes/{node}/qemu/{vmId}/snapshot", postData);
+            var warnings = Array.Empty<string>();
             if (waitForTask && !string.IsNullOrEmpty(upid))
-                client.WaitForTask(node!, upid);
+                warnings = client.WaitForTask(node!, upid, taskTimeoutSeconds);
 
+            if (showWarningsOutcome && warnings.Length > 0)
+                return new ResultData("Done With Warnings", new Dictionary<string, object> { { "Warnings", warnings } });
             return new ResultData("Done");
         }
         catch (Exception e)

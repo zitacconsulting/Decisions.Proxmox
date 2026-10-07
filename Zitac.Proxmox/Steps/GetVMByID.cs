@@ -86,8 +86,8 @@ public class GetVMByID : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
 
             if (string.IsNullOrEmpty(node))
             {
-                try { node = client.FindNodeForVM(vmId); }
-                catch { return new ResultData("Not Found"); }
+                node = client.TryFindNodeForVM(vmId);
+                if (node == null) return new ResultData("Not Found");
             }
 
             try

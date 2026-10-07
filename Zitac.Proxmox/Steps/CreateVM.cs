@@ -21,6 +21,12 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
     private bool waitForTask = true;
 
     [WritableValue]
+    private int taskTimeoutSeconds = 600;
+
+    [WritableValue]
+    private bool showWarningsOutcome;
+
+    [WritableValue]
     private bool useApiToken;
 
     [PropertyClassification(0, "Use API Token", new string[] { "Authentication" })]
@@ -38,6 +44,16 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
 
     [PropertyClassification(2, "Wait For Task Completion", new string[] { "Settings" })]
     public bool WaitForTask { get { return waitForTask; } set { waitForTask = value; } }
+
+    [PropertyClassification(3, "Task Timeout (Seconds, 0 = No Limit)", new string[] { "Settings" })]
+    public int TaskTimeoutSeconds { get { return taskTimeoutSeconds; } set { taskTimeoutSeconds = value; } }
+
+    [PropertyClassification(5, "Show Outcome for 'Done With Warnings'", new string[] { "Settings" })]
+    public bool ShowWarningsOutcome
+    {
+        get { return showWarningsOutcome; }
+        set { showWarningsOutcome = value; this.OnPropertyChanged("OutcomeScenarios"); }
+    }
 
     public IInputMapping[] DefaultInputs => new IInputMapping[]
     {
@@ -81,11 +97,16 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Tags"),
     };
 
-    public override OutcomeScenarioData[] OutcomeScenarios => new[]
+    public override OutcomeScenarioData[] OutcomeScenarios
     {
-        new OutcomeScenarioData("Done", new DataDescription(typeof(ProxmoxVM), "VM", false)),
-        new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")),
-    };
+        get
+        {
+            var outcomes = new List<OutcomeScenarioData> { new OutcomeScenarioData("Done", new DataDescription(typeof(ProxmoxVM), "VM", false)) };
+            if (showWarningsOutcome) outcomes.Add(new OutcomeScenarioData("Done With Warnings", new DataDescription(typeof(ProxmoxVM), "VM", false), new DataDescription(typeof(string), "Warnings", true)));
+            outcomes.Add(new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")));
+            return outcomes.ToArray();
+        }
+    }
 
     public ResultData Run(StepStartData data)
     {
@@ -132,7 +153,7 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
                 { "bios",    biosType == BiosType.OVMF_UEFI ? "ovmf" : "seabios" },
                 { "scsihw",  MapScsiController(scsiController) },
                 { "scsi0",   $"{storage}:{diskSizeGb}" },
-                { "net0",    $"{MapNetworkModel(networkModel)},bridge={networkBridge}" },
+                { "net0",    $"{networkModel.ToProxmox()},bridge={networkBridge}" },
                 { "onboot",  startOnBoot ? "1" : "0" },
                 { "agent",   enableAgent ? "enabled=1" : "enabled=0" },
             };
@@ -167,12 +188,15 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
                 postData["tags"] = tags;
 
             var upid = client.Post($"/nodes/{node}/qemu", postData);
+            var warnings = Array.Empty<string>();
             if (waitForTask && !string.IsNullOrEmpty(upid))
-                client.WaitForTask(node!, upid);
+                warnings = client.WaitForTask(node!, upid, taskTimeoutSeconds);
 
             var status = client.Get($"/nodes/{node}/qemu/{vmId}/status/current");
             var vm = ProxmoxVM.FromJson(status, node!);
 
+            if (showWarningsOutcome && warnings.Length > 0)
+                return new ResultData("Done With Warnings", new Dictionary<string, object> { { "VM", vm }, { "Warnings", warnings } });
             return new ResultData("Done", new Dictionary<string, object> { { "VM", vm } });
         }
         catch (Exception e)
@@ -206,12 +230,4 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         _                               => "virtio-scsi-pci",
     };
 
-    private static string MapNetworkModel(NetworkModel model) => model switch
-    {
-        NetworkModel.VirtIO  => "virtio",
-        NetworkModel.E1000   => "e1000",
-        NetworkModel.E1000e  => "e1000e",
-        NetworkModel.RTL8139 => "rtl8139",
-        _                    => "virtio",
-    };
 }

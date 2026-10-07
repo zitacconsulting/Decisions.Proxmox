@@ -83,7 +83,7 @@ public class AddVMNetwork : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataPr
             var iface = new ProxmoxNetworkInterface
             {
                 Interface = freeSlot,
-                Model = MapModel(model),
+                Model = model.ToProxmox(),
                 Bridge = bridge,
                 VlanTag = vlanTag > 0 ? vlanTag : null,
                 Firewall = firewall,
@@ -107,11 +107,4 @@ public class AddVMNetwork : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataPr
         }
     }
 
-    private static string MapModel(NetworkModel model) => model switch
-    {
-        NetworkModel.E1000   => "e1000",
-        NetworkModel.E1000e  => "e1000e",
-        NetworkModel.RTL8139 => "rtl8139",
-        _                    => "virtio",
-    };
 }

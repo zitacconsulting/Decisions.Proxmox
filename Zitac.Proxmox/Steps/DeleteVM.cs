@@ -3,12 +3,13 @@ using DecisionsFramework.Design.Properties;
 using DecisionsFramework.Design.ConfigurationStorage.Attributes;
 using DecisionsFramework.Design.Flow.Mapping;
 using DecisionsFramework.Design.Flow.CoreSteps;
+using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
 [AutoRegisterStep("Delete VM", "Integration", "Proxmox", "VMs")]
 [Writable]
-public class DeleteVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer
+public class DeleteVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
 {
     [WritableValue]
     private bool ignoreSSLErrors;
@@ -31,6 +32,11 @@ public class DeleteVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
 
     [PropertyClassification(1, "Port", new string[] { "Settings" })]
     public int Port { get { return port; } set { port = value; } }
+
+    public IInputMapping[] DefaultInputs => new IInputMapping[]
+    {
+        new IgnoreInputMapping { InputDataName = "Node" },
+    };
 
     public DataDescription[] InputData => new[]
     {
@@ -59,6 +65,7 @@ public class DeleteVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         {
             using var client = new ProxmoxClient(hostname!, port, ignoreSSLErrors);
             client.Authenticate(credentials);
+            if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
             client.Delete($"/nodes/{node}/qemu/{vmId}");
             return new ResultData("Done");
         }

@@ -3,12 +3,13 @@ using DecisionsFramework.Design.Properties;
 using DecisionsFramework.Design.ConfigurationStorage.Attributes;
 using DecisionsFramework.Design.Flow.Mapping;
 using DecisionsFramework.Design.Flow.CoreSteps;
+using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
 [AutoRegisterStep("Get Snapshots", "Integration", "Proxmox", "Snapshots")]
 [Writable]
-public class GetSnapshots : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer
+public class GetSnapshots : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
 {
     [WritableValue]
     private bool ignoreSSLErrors;
@@ -41,6 +42,11 @@ public class GetSnapshots : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataPr
         get { return showOutcomeForNoResults; }
         set { showOutcomeForNoResults = value; this.OnPropertyChanged("OutcomeScenarios"); }
     }
+
+    public IInputMapping[] DefaultInputs => new IInputMapping[]
+    {
+        new IgnoreInputMapping { InputDataName = "Node" },
+    };
 
     public DataDescription[] InputData => new[]
     {
@@ -77,6 +83,7 @@ public class GetSnapshots : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataPr
         {
             using var client = new ProxmoxClient(hostname!, port, ignoreSSLErrors);
             client.Authenticate(credentials);
+            if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
 
             var result = client.Get($"/nodes/{node}/qemu/{vmId}/snapshot");
             var snapshots = new List<ProxmoxSnapshot>();

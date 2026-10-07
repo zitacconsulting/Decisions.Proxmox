@@ -21,6 +21,12 @@ public class CloneVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduce
     private bool waitForTask = true;
 
     [WritableValue]
+    private int taskTimeoutSeconds = 3600;
+
+    [WritableValue]
+    private bool showWarningsOutcome;
+
+    [WritableValue]
     private bool fullClone = true;
 
     [WritableValue]
@@ -42,11 +48,22 @@ public class CloneVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduce
     [PropertyClassification(2, "Wait For Task Completion", new string[] { "Settings" })]
     public bool WaitForTask { get { return waitForTask; } set { waitForTask = value; } }
 
-    [PropertyClassification(3, "Full Clone (vs Linked Clone)", new string[] { "Settings" })]
+    [PropertyClassification(3, "Task Timeout (Seconds, 0 = No Limit)", new string[] { "Settings" })]
+    public int TaskTimeoutSeconds { get { return taskTimeoutSeconds; } set { taskTimeoutSeconds = value; } }
+
+    [PropertyClassification(5, "Show Outcome for 'Done With Warnings'", new string[] { "Settings" })]
+    public bool ShowWarningsOutcome
+    {
+        get { return showWarningsOutcome; }
+        set { showWarningsOutcome = value; this.OnPropertyChanged("OutcomeScenarios"); }
+    }
+
+    [PropertyClassification(4, "Full Clone (vs Linked Clone)", new string[] { "Settings" })]
     public bool FullClone { get { return fullClone; } set { fullClone = value; } }
 
     public IInputMapping[] DefaultInputs => new IInputMapping[]
     {
+        new IgnoreInputMapping { InputDataName = "Node" },
         new IgnoreInputMapping { InputDataName = "New VM ID" },
         new IgnoreInputMapping { InputDataName = "Target Node" },
         new IgnoreInputMapping { InputDataName = "Target Storage" },
@@ -66,11 +83,16 @@ public class CloneVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduce
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Target Storage"),
     };
 
-    public override OutcomeScenarioData[] OutcomeScenarios => new[]
+    public override OutcomeScenarioData[] OutcomeScenarios
     {
-        new OutcomeScenarioData("Done", new DataDescription(typeof(int), "New VM ID")),
-        new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")),
-    };
+        get
+        {
+            var outcomes = new List<OutcomeScenarioData> { new OutcomeScenarioData("Done", new DataDescription(typeof(int), "New VM ID")) };
+            if (showWarningsOutcome) outcomes.Add(new OutcomeScenarioData("Done With Warnings", new DataDescription(typeof(int), "New VM ID"), new DataDescription(typeof(string), "Warnings", true)));
+            outcomes.Add(new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")));
+            return outcomes.ToArray();
+        }
+    }
 
     public ResultData Run(StepStartData data)
     {
@@ -87,6 +109,7 @@ public class CloneVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduce
         {
             using var client = new ProxmoxClient(hostname!, port, ignoreSSLErrors);
             client.Authenticate(credentials);
+            if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
 
             var postData = new Dictionary<string, string>
             {
@@ -98,9 +121,12 @@ public class CloneVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduce
             if (!string.IsNullOrEmpty(targetStorage)) postData["storage"] = targetStorage;
 
             var upid = client.Post($"/nodes/{node}/qemu/{vmId}/clone", postData);
+            var warnings = Array.Empty<string>();
             if (waitForTask && !string.IsNullOrEmpty(upid))
-                client.WaitForTask(node!, upid);
+                warnings = client.WaitForTask(node!, upid, taskTimeoutSeconds);
 
+            if (showWarningsOutcome && warnings.Length > 0)
+                return new ResultData("Done With Warnings", new Dictionary<string, object> { { "New VM ID", newVmId }, { "Warnings", warnings } });
             return new ResultData("Done", new Dictionary<string, object> { { "New VM ID", newVmId } });
         }
         catch (Exception e)

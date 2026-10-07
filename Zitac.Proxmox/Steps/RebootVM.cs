@@ -3,12 +3,13 @@ using DecisionsFramework.Design.Properties;
 using DecisionsFramework.Design.ConfigurationStorage.Attributes;
 using DecisionsFramework.Design.Flow.Mapping;
 using DecisionsFramework.Design.Flow.CoreSteps;
+using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
 [AutoRegisterStep("Reboot VM", "Integration", "Proxmox", "VMs")]
 [Writable]
-public class RebootVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer
+public class RebootVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
 {
     [WritableValue]
     private bool ignoreSSLErrors;
@@ -18,6 +19,12 @@ public class RebootVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
 
     [WritableValue]
     private bool waitForTask = true;
+
+    [WritableValue]
+    private int taskTimeoutSeconds = 600;
+
+    [WritableValue]
+    private bool showWarningsOutcome;
 
     [WritableValue]
     private bool useApiToken;
@@ -38,6 +45,21 @@ public class RebootVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
     [PropertyClassification(2, "Wait For Task Completion", new string[] { "Settings" })]
     public bool WaitForTask { get { return waitForTask; } set { waitForTask = value; } }
 
+    [PropertyClassification(3, "Task Timeout (Seconds, 0 = No Limit)", new string[] { "Settings" })]
+    public int TaskTimeoutSeconds { get { return taskTimeoutSeconds; } set { taskTimeoutSeconds = value; } }
+
+    [PropertyClassification(5, "Show Outcome for 'Done With Warnings'", new string[] { "Settings" })]
+    public bool ShowWarningsOutcome
+    {
+        get { return showWarningsOutcome; }
+        set { showWarningsOutcome = value; this.OnPropertyChanged("OutcomeScenarios"); }
+    }
+
+    public IInputMapping[] DefaultInputs => new IInputMapping[]
+    {
+        new IgnoreInputMapping { InputDataName = "Node" },
+    };
+
     public DataDescription[] InputData => new[]
     {
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Hostname") { Categories = new string[] { "Connection" } },
@@ -48,11 +70,16 @@ public class RebootVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(int)), "VM ID"),
     };
 
-    public override OutcomeScenarioData[] OutcomeScenarios => new[]
+    public override OutcomeScenarioData[] OutcomeScenarios
     {
-        new OutcomeScenarioData("Done"),
-        new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")),
-    };
+        get
+        {
+            var outcomes = new List<OutcomeScenarioData> { new OutcomeScenarioData("Done") };
+            if (showWarningsOutcome) outcomes.Add(new OutcomeScenarioData("Done With Warnings", new DataDescription(typeof(string), "Warnings", true)));
+            outcomes.Add(new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")));
+            return outcomes.ToArray();
+        }
+    }
 
     public ResultData Run(StepStartData data)
     {
@@ -65,9 +92,13 @@ public class RebootVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         {
             using var client = new ProxmoxClient(hostname!, port, ignoreSSLErrors);
             client.Authenticate(credentials);
+            if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
             var upid = client.Post($"/nodes/{node}/qemu/{vmId}/status/reboot");
+            var warnings = Array.Empty<string>();
             if (waitForTask && !string.IsNullOrEmpty(upid))
-                client.WaitForTask(node!, upid);
+                warnings = client.WaitForTask(node!, upid, taskTimeoutSeconds);
+            if (showWarningsOutcome && warnings.Length > 0)
+                return new ResultData("Done With Warnings", new Dictionary<string, object> { { "Warnings", warnings } });
             return new ResultData("Done");
         }
         catch (Exception e)
