@@ -85,8 +85,8 @@ public class CreateSnapshot : BaseFlowAwareStep, ISyncStep, IDataConsumer, IData
     {
         get
         {
-            var outcomes = new List<OutcomeScenarioData> { new OutcomeScenarioData("Done") };
-            if (showWarningsOutcome) outcomes.Add(new OutcomeScenarioData("Done With Warnings", new DataDescription(typeof(string), "Warnings", true)));
+            var outcomes = new List<OutcomeScenarioData> { new OutcomeScenarioData("Done", new DataDescription(typeof(string), "Snapshot Name")) };
+            if (showWarningsOutcome) outcomes.Add(new OutcomeScenarioData("Done With Warnings", new DataDescription(typeof(string), "Snapshot Name"), new DataDescription(typeof(string), "Warnings", true)));
             outcomes.Add(new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")));
             return outcomes.ToArray();
         }
@@ -98,7 +98,8 @@ public class CreateSnapshot : BaseFlowAwareStep, ISyncStep, IDataConsumer, IData
         var credentials = data.Data["Credentials"];
         var node = data.Data["Node"] as string;
         var vmId = (int)data.Data["VM ID"];
-        var snapName = data.Data["Snapshot Name"] as string;
+        // Proxmox only accepts letters, digits, '_' and '-'; the name actually used is returned
+        var snapName = SnapshotName.ToProxmox(data.Data["Snapshot Name"] as string ?? string.Empty);
         var description = data.Data["Description"] as string;
 
         try
@@ -107,7 +108,7 @@ public class CreateSnapshot : BaseFlowAwareStep, ISyncStep, IDataConsumer, IData
             client.Authenticate(credentials);
             if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
 
-            var postData = new Dictionary<string, string> { { "snapname", snapName! } };
+            var postData = new Dictionary<string, string> { { "snapname", snapName } };
             if (!string.IsNullOrEmpty(description)) postData["description"] = description;
             if (includeRAM) postData["vmstate"] = "1";
 
@@ -117,8 +118,8 @@ public class CreateSnapshot : BaseFlowAwareStep, ISyncStep, IDataConsumer, IData
                 warnings = client.WaitForTask(node!, upid, taskTimeoutSeconds);
 
             if (showWarningsOutcome && warnings.Length > 0)
-                return new ResultData("Done With Warnings", new Dictionary<string, object> { { "Warnings", warnings } });
-            return new ResultData("Done");
+                return new ResultData("Done With Warnings", new Dictionary<string, object> { { "Snapshot Name", snapName }, { "Warnings", warnings } });
+            return new ResultData("Done", new Dictionary<string, object> { { "Snapshot Name", snapName } });
         }
         catch (Exception e)
         {

@@ -90,7 +90,7 @@ public class RevertSnapshot : BaseFlowAwareStep, ISyncStep, IDataConsumer, IData
         var credentials = data.Data["Credentials"];
         var node = data.Data["Node"] as string;
         var vmId = (int)data.Data["VM ID"];
-        var snapName = data.Data["Snapshot Name"] as string;
+        var snapName = SnapshotName.ToProxmox(data.Data["Snapshot Name"] as string ?? string.Empty);
 
         try
         {

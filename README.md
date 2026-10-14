@@ -46,7 +46,7 @@ How scripts are passed: PowerShell with `-EncodedCommand` (about 12,000 characte
 
 ### Snapshot Management
 - `GetSnapshots` - List all snapshots for a VM
-- `CreateSnapshot` - Create a VM snapshot
+- `CreateSnapshot` - Create a VM snapshot. Proxmox only allows letters, digits, `_` and `-` (starting with a letter, max 40 characters), so the name is converted (e.g. `Snapshot_2026-10-14 19:28` → `Snapshot_2026-10-14_19-28`); the `Snapshot Name` output is the name actually used. `DeleteSnapshot` and `RevertSnapshot` convert names the same way
 - `DeleteSnapshot` - Delete a VM snapshot
 - `RevertSnapshot` - Revert a VM to a snapshot state
 
