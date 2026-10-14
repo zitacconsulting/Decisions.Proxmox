@@ -8,6 +8,8 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Add VM Disk", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class AddVMDisk : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
@@ -94,7 +96,7 @@ public class AddVMDisk : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
             if (updated.TryGetProperty(freeSlot, out var raw))
                 disk = ProxmoxDisk.Parse(freeSlot, raw.GetString()!);
 
-            disk ??= new ProxmoxDisk { Interface = freeSlot, Storage = storage, Size = $"{sizeGb}G" };
+            disk ??= new ProxmoxDisk { Interface = freeSlot, Storage = storage, SizeGB = sizeGb };
 
             return new ResultData("Done", new Dictionary<string, object> { { "Disk", disk } });
         }

@@ -7,6 +7,9 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
+// Ejects the ISO and leaves an empty CD drive, which Mount ISO reuses. Works on a running VM.
 [AutoRegisterStep("Unmount ISO", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class UnmountISO : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
@@ -37,12 +40,13 @@ public class UnmountISO : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProd
             : new DataDescription((DecisionsType)new DecisionsNativeType(typeof(UsernamePasswordCredentials)), "Credentials") { Categories = new string[] { "Connection" } },
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Node"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(int)), "VM ID"),
-        new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Slot"),
+        new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Interface"),
     };
 
     public override OutcomeScenarioData[] OutcomeScenarios => new[]
     {
         new OutcomeScenarioData("Done"),
+        new OutcomeScenarioData("Not Found"),
         new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")),
     };
 
@@ -52,7 +56,7 @@ public class UnmountISO : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProd
         var credentials = data.Data["Credentials"];
         var node = data.Data["Node"] as string;
         var vmId = (int)data.Data["VM ID"];
-        var slot = data.Data["Slot"] as string;
+        var iface = (data.Data["Interface"] as string)?.Trim().ToLowerInvariant();
 
         try
         {
@@ -60,9 +64,16 @@ public class UnmountISO : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProd
             client.Authenticate(credentials);
             if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
 
+            // Only touches CD drives; a disk on that interface is left alone
+            var existing = string.IsNullOrEmpty(iface) ? null : ProxmoxVMConfig.Drive(client.Get($"/nodes/{node}/qemu/{vmId}/config"), iface);
+            if (existing == null)
+                return new ResultData("Not Found");
+            if (!ProxmoxVMConfig.IsCDROM(existing))
+                return new ResultData("Error", new Dictionary<string, object> { { "Error Message", $"{iface} is a disk, not a CD drive." } });
+
             client.Put($"/nodes/{node}/qemu/{vmId}/config", new Dictionary<string, string>
             {
-                { "delete", slot! }
+                { iface!, "none,media=cdrom" }
             });
 
             return new ResultData("Done");

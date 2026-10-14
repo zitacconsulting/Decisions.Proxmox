@@ -7,6 +7,8 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Get All VMs", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class GetAllVMs : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
@@ -26,6 +28,9 @@ public class GetAllVMs : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
     [WritableValue]
     private bool useApiToken;
 
+    [WritableValue]
+    private bool excludeTemplates;
+
     [PropertyClassification(0, "Ignore SSL Errors", new string[] { "Settings" })]
     public bool IgnoreSSLErrors { get { return ignoreSSLErrors; } set { ignoreSSLErrors = value; } }
 
@@ -39,12 +44,12 @@ public class GetAllVMs : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
         set { showOutcomeForNoResults = value; this.OnPropertyChanged("OutcomeScenarios"); }
     }
 
+    // Off: one API call for the whole cluster. On: three or more calls per VM (status, config, guest agent).
     [PropertyClassification(3, "Fetch Extended Info", new string[] { "Settings" })]
-    public bool FetchExtendedInfo
-    {
-        get { return fetchExtendedInfo; }
-        set { fetchExtendedInfo = value; this.OnPropertyChanged("OutcomeScenarios"); }
-    }
+    public bool FetchExtendedInfo { get { return fetchExtendedInfo; } set { fetchExtendedInfo = value; } }
+
+    [PropertyClassification(4, "Exclude Templates", new string[] { "Settings" })]
+    public bool ExcludeTemplates { get { return excludeTemplates; } set { excludeTemplates = value; } }
 
     [PropertyClassification(0, "Use API Token", new string[] { "Authentication" })]
     public bool UseApiToken
@@ -77,10 +82,9 @@ public class GetAllVMs : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
     {
         get
         {
-            var vmType = fetchExtendedInfo ? typeof(ProxmoxVMExtended) : typeof(ProxmoxVM);
             var outcomes = new List<OutcomeScenarioData>
             {
-                new OutcomeScenarioData("Done", new DataDescription(vmType, "VMs", true))
+                new OutcomeScenarioData("Done", new DataDescription(typeof(ProxmoxVM), "VMs", true))
             };
             if (showOutcomeForNoResults) outcomes.Add(new OutcomeScenarioData("No Results"));
             outcomes.Add(new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")));
@@ -99,25 +103,16 @@ public class GetAllVMs : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
             using var client = new ProxmoxClient(hostname!, port, ignoreSSLErrors);
             client.Authenticate(credentials);
 
-            var vms = new List<ProxmoxVM>();
+            var vms = client.GetClusterGuests("qemu")
+                .Where(res => string.IsNullOrEmpty(node) || string.Equals(ProxmoxJson.Str(res, "node"), node, StringComparison.OrdinalIgnoreCase))
+                .Select(ProxmoxVM.FromResource)
+                .Where(vm => !excludeTemplates || !vm.Template)
+                .OrderBy(vm => vm.VMID)
+                .ToList();
 
-            if (string.IsNullOrEmpty(node))
-            {
-                var nodes = client.Get("/nodes");
-                foreach (var nodeEl in nodes.EnumerateArray())
-                {
-                    var nodeName = nodeEl.GetProperty("node").GetString()!;
-                    var nodeVms = client.Get($"/nodes/{nodeName}/qemu");
-                    foreach (var vmEl in nodeVms.EnumerateArray())
-                        vms.Add(BuildVM(client, vmEl, nodeName));
-                }
-            }
-            else
-            {
-                var nodeVms = client.Get($"/nodes/{node}/qemu");
-                foreach (var vmEl in nodeVms.EnumerateArray())
-                    vms.Add(BuildVM(client, vmEl, node));
-            }
+            // VMs on an offline node report status "unknown" and their config can't be read; keep the summary
+            if (fetchExtendedInfo)
+                vms = vms.Select(vm => vm.PowerState == PowerState.Unknown ? vm : ProxmoxVM.Load(client, vm.Node!, vm.VMID)).ToList();
 
             if (vms.Count == 0 && showOutcomeForNoResults)
                 return new ResultData("No Results");
@@ -128,16 +123,5 @@ public class GetAllVMs : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
         {
             return new ResultData("Error", new Dictionary<string, object> { { "Error Message", e.ToString() } });
         }
-    }
-
-    private ProxmoxVM BuildVM(ProxmoxClient client, System.Text.Json.JsonElement element, string node)
-    {
-        if (fetchExtendedInfo)
-        {
-            var vm = ProxmoxVMExtended.FromJson(element, node);
-            vm.ApplyConfig(client.Get($"/nodes/{node}/qemu/{vm.VMID}/config"));
-            return vm;
-        }
-        return ProxmoxVM.FromJson(element, node);
     }
 }

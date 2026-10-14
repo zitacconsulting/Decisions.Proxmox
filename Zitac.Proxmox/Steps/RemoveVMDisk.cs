@@ -7,6 +7,8 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Remove VM Disk", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class RemoveVMDisk : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep

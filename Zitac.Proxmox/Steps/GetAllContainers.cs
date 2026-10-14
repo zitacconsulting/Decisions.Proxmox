@@ -7,6 +7,8 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Get All Containers", "Integration", "Proxmox", "Containers")]
 [Writable]
 public class GetAllContainers : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
@@ -82,25 +84,11 @@ public class GetAllContainers : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDa
             using var client = new ProxmoxClient(hostname!, port, ignoreSSLErrors);
             client.Authenticate(credentials);
 
-            var containers = new List<ProxmoxContainer>();
-
-            if (string.IsNullOrEmpty(node))
-            {
-                var nodes = client.Get("/nodes");
-                foreach (var nodeEl in nodes.EnumerateArray())
-                {
-                    var nodeName = nodeEl.GetProperty("node").GetString()!;
-                    var nodeContainers = client.Get($"/nodes/{nodeName}/lxc");
-                    foreach (var ctEl in nodeContainers.EnumerateArray())
-                        containers.Add(ProxmoxContainer.FromJson(ctEl, nodeName));
-                }
-            }
-            else
-            {
-                var nodeContainers = client.Get($"/nodes/{node}/lxc");
-                foreach (var ctEl in nodeContainers.EnumerateArray())
-                    containers.Add(ProxmoxContainer.FromJson(ctEl, node));
-            }
+            var containers = client.GetClusterGuests("lxc")
+                .Where(res => string.IsNullOrEmpty(node) || string.Equals(ProxmoxJson.Str(res, "node"), node, StringComparison.OrdinalIgnoreCase))
+                .Select(ProxmoxContainer.FromResource)
+                .OrderBy(ct => ct.VMID)
+                .ToList();
 
             if (containers.Count == 0 && showOutcomeForNoResults)
                 return new ResultData("No Results");

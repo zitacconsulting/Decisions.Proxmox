@@ -8,6 +8,8 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Mount ISO", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class MountISO : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
@@ -40,6 +42,7 @@ public class MountISO : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
     {
         new IgnoreInputMapping { InputDataName = "Node" },
         new IgnoreInputMapping { InputDataName = "ISO Image" },
+        new IgnoreInputMapping { InputDataName = "Interface" },
     };
 
     public DataDescription[] InputData => new[]
@@ -51,11 +54,12 @@ public class MountISO : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Node"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(int)), "VM ID"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(ProxmoxISOImage)), "ISO Image"),
+        new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Interface"),
     };
 
     public override OutcomeScenarioData[] OutcomeScenarios => new[]
     {
-        new OutcomeScenarioData("Done", new DataDescription(typeof(ProxmoxMountedISO), "Mounted ISO", false)),
+        new OutcomeScenarioData("Done", new DataDescription(typeof(ProxmoxCDROM), "CDROM", false)),
         new OutcomeScenarioData("No Free Slot"),
         new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")),
     };
@@ -67,6 +71,7 @@ public class MountISO : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         var node = data.Data["Node"] as string;
         var vmId = (int)data.Data["VM ID"];
         var isoImage = data.Data["ISO Image"] as ProxmoxISOImage;
+        var requested = (data.Data.TryGetValue("Interface", out var i) ? i as string : null)?.Trim().ToLowerInvariant();
 
         try
         {
@@ -77,23 +82,41 @@ public class MountISO : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
                 node = client.FindNodeForVM(vmId);
 
             var config = client.Get($"/nodes/{node}/qemu/{vmId}/config");
-            var freeSlot = IdeSlots.FirstOrDefault(s => !config.TryGetProperty(s, out _));
-
-            if (freeSlot == null)
-                return new ResultData("No Free Slot");
+            string? target;
+            if (!string.IsNullOrEmpty(requested))
+            {
+                // A given interface gets its ISO replaced, or a new CD drive if it's free
+                if (!ProxmoxVMConfig.IsValidCDROMInterface(requested))
+                    return Error($"'{requested}' is not a valid CD-ROM interface (ide0-3, sata0-5 or scsi0-30).");
+                var existing = ProxmoxVMConfig.Drive(config, requested);
+                if (existing != null && !ProxmoxVMConfig.IsCDROM(existing))
+                    return Error($"{requested} is a disk, not a CD drive.");
+                target = requested;
+            }
+            else
+            {
+                // Reuse an empty CD drive first (works on a running VM), then add one in a free IDE slot
+                target = ProxmoxVMConfig.CDROMs(config).FirstOrDefault(c => c.Type == "Empty")?.Interface
+                         ?? IdeSlots.FirstOrDefault(s => ProxmoxVMConfig.Drive(config, s) == null);
+                if (target == null)
+                    return new ResultData("No Free Slot");
+            }
 
             var volumeRef = isoImage!.ToVolumeRef();
             client.Put($"/nodes/{node}/qemu/{vmId}/config", new Dictionary<string, string>
             {
-                { freeSlot, $"{volumeRef},media=cdrom" }
+                { target, $"{volumeRef},media=cdrom" }
             });
 
-            var mounted = ProxmoxMountedISO.FromVolumeRef(freeSlot, volumeRef);
-            return new ResultData("Done", new Dictionary<string, object> { { "Mounted ISO", mounted } });
+            var mounted = ProxmoxCDROM.FromVolumeRef(target, volumeRef);
+            return new ResultData("Done", new Dictionary<string, object> { { "CDROM", mounted } });
         }
         catch (Exception e)
         {
             return new ResultData("Error", new Dictionary<string, object> { { "Error Message", e.ToString() } });
         }
     }
+
+    private static ResultData Error(string message) =>
+        new ResultData("Error", new Dictionary<string, object> { { "Error Message", message } });
 }

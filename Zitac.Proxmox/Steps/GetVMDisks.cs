@@ -1,5 +1,3 @@
-using System.Text.Json;
-using System.Text.RegularExpressions;
 using DecisionsFramework.Design.Flow;
 using DecisionsFramework.Design.Properties;
 using DecisionsFramework.Design.ConfigurationStorage.Attributes;
@@ -9,12 +7,12 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Get VM Disks", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class GetVMDisks : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
 {
-    private static readonly Regex DiskKey = new(@"^(scsi|ide|virtio|sata)\d+$", RegexOptions.Compiled);
-
     [WritableValue] private bool ignoreSSLErrors;
     [WritableValue] private int port = 8006;
     [WritableValue] private bool useApiToken;
@@ -63,17 +61,8 @@ public class GetVMDisks : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProd
             if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
 
             var config = client.Get($"/nodes/{node}/qemu/{vmId}/config");
-            var disks = new List<ProxmoxDisk>();
-            foreach (var prop in config.EnumerateObject())
-            {
-                if (prop.Value.ValueKind != JsonValueKind.String) continue;
-                if (!DiskKey.IsMatch(prop.Name)) continue;
-                var raw = prop.Value.GetString()!;
-                if (raw.Contains("media=cdrom")) continue;
-                var disk = ProxmoxDisk.Parse(prop.Name, raw);
-                if (disk != null) disks.Add(disk);
-            }
-            return new ResultData("Done", new Dictionary<string, object> { { "Disks", disks.ToArray() } });
+            var disks = ProxmoxVMConfig.Disks(config);
+            return new ResultData("Done", new Dictionary<string, object> { { "Disks", disks } });
         }
         catch (Exception e)
         {

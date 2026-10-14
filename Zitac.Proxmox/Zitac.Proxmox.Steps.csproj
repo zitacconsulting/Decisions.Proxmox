@@ -7,6 +7,6 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="DecisionsSDK" Version="9.25.0" />
+    <PackageReference Include="DecisionsSDK" Version="9.31.0" />
   </ItemGroup>
 </Project>

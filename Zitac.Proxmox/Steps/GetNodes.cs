@@ -6,6 +6,8 @@ using DecisionsFramework.Design.Flow.CoreSteps;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Get Nodes", "Integration", "Proxmox", "Nodes")]
 [Writable]
 public class GetNodes : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer

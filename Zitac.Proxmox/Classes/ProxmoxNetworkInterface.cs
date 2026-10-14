@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.Serialization;
 using System.Text;
 using DecisionsFramework.ServiceLayer.Utilities;
@@ -23,7 +24,16 @@ public class ProxmoxNetworkInterface
     [DataMember] public int? VlanTag { get; set; }
     [DataMember] public bool Firewall { get; set; }
 
-    // Any other options on the line (e.g. "queues=4,mtu=1500"), kept as-is so updates don't drop them
+    // False when the link is set down ("Disconnect" in the Proxmox GUI)
+    [DataMember] public bool Connected { get; set; } = true;
+    [DataMember] public int? MTU { get; set; }
+    [DataMember] public double? RateLimitMBps { get; set; }
+    [DataMember] public int? Queues { get; set; }
+
+    // Reported by the guest agent, matched on MAC address. Empty if the agent isn't responding.
+    [DataMember] public string[] IPAddresses { get; set; } = Array.Empty<string>();
+
+    // Any other options on the line (e.g. "trunks=10;20"), kept as-is so updates don't drop them
     [DataMember] public string? OtherOptions { get; set; }
 
     public ProxmoxNetworkInterface() { }
@@ -41,6 +51,10 @@ public class ProxmoxNetworkInterface
             if (key == "bridge") result.Bridge = val;
             else if (key == "tag" && int.TryParse(val, out var tag)) result.VlanTag = tag;
             else if (key == "firewall") result.Firewall = val == "1";
+            else if (key == "link_down") result.Connected = val != "1";
+            else if (key == "mtu" && int.TryParse(val, out var mtu)) result.MTU = mtu;
+            else if (key == "queues" && int.TryParse(val, out var queues)) result.Queues = queues;
+            else if (key == "rate" && double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out var rate)) result.RateLimitMBps = rate;
             else if (key == "model") result.Model = val;
             else if (key == "macaddr") result.MacAddress = val;
             else if (KnownModels.Contains(key)) { result.Model = key; result.MacAddress = string.IsNullOrEmpty(val) ? null : val; }
@@ -61,6 +75,10 @@ public class ProxmoxNetworkInterface
         if (!string.IsNullOrEmpty(Bridge)) sb.Append($",bridge={Bridge}");
         if (Firewall) sb.Append(",firewall=1");
         if (VlanTag.HasValue && VlanTag.Value > 0) sb.Append($",tag={VlanTag}");
+        if (!Connected) sb.Append(",link_down=1");
+        if (MTU.HasValue) sb.Append($",mtu={MTU}");
+        if (Queues.HasValue) sb.Append($",queues={Queues}");
+        if (RateLimitMBps.HasValue) sb.Append(",rate=").Append(RateLimitMBps.Value.ToString(CultureInfo.InvariantCulture));
         if (!string.IsNullOrEmpty(OtherOptions)) sb.Append($",{OtherOptions}");
         return sb.ToString();
     }

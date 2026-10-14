@@ -71,7 +71,8 @@ public class ProxmoxClient : IDisposable
         return doc.RootElement.GetProperty("data").Clone();
     }
 
-    public string Post(string path, Dictionary<string, string>? data = null)
+    // A sequence rather than a dictionary so list parameters can repeat a key (command=a&command=b)
+    public string Post(string path, IEnumerable<KeyValuePair<string, string>>? data = null)
     {
         HttpContent content = data != null
             ? new FormUrlEncodedContent(data)
@@ -133,25 +134,28 @@ public class ProxmoxClient : IDisposable
 
     public string? TryFindNodeForContainer(int containerId) => FindNodeInCluster("lxc", containerId);
 
-    // One call lists every guest in the cluster with its node. Proxmox only includes
-    // guests the credentials have VM.Audit on, so "missing" can also mean "no access".
-    private string? FindNodeInCluster(string guestType, int id)
-    {
-        var resources = Get("/cluster/resources?type=vm");
-        foreach (var res in resources.EnumerateArray())
-        {
-            if (!res.TryGetProperty("type", out var type) || type.GetString() != guestType) continue;
-            if (!res.TryGetProperty("vmid", out var vmid)) continue;
+    // One call lists every guest ("qemu" or "lxc") in the cluster with its node. Proxmox only
+    // includes guests the credentials have VM.Audit on, so "missing" can also mean "no access".
+    public List<JsonElement> GetClusterGuests(string guestType) =>
+        Get("/cluster/resources?type=vm").EnumerateArray()
+            .Where(res => ProxmoxJson.Str(res, "type") == guestType)
+            .ToList();
 
-            // vmid is normally a number, but tolerate it arriving as a string
-            var resId = vmid.ValueKind == JsonValueKind.Number ? vmid.GetInt32()
-                      : int.TryParse(vmid.GetString(), out var parsed) ? parsed : -1;
+    // vmid is normally a number, but ProxmoxJson tolerates it arriving as a string
+    private string? FindNodeInCluster(string guestType, int id) =>
+        GetClusterGuests(guestType)
+            .Where(res => ProxmoxJson.Int(res, "vmid") == id)
+            .Select(res => ProxmoxJson.Str(res, "node"))
+            .FirstOrDefault();
 
-            if (resId == id && res.TryGetProperty("node", out var node))
-                return node.GetString();
-        }
-        return null;
-    }
+    // For node-level lookups where any node will do
+    public string FirstOnlineNode() =>
+        Get("/nodes").EnumerateArray()
+            .Where(n => ProxmoxJson.Str(n, "status") == "online")
+            .Select(n => ProxmoxJson.Str(n, "node"))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .FirstOrDefault()
+        ?? throw new Exception("No online node found in the cluster.");
 
     private static string NotFoundMessage(string kind, int id) =>
         $"{kind} {id} not found in the cluster, or the credentials lack VM.Audit permission on it.";
@@ -196,6 +200,93 @@ public class ProxmoxClient : IDisposable
         }
         catch { }
         return new[] { exitStatus };
+    }
+
+    public const string GuestAgentRequiredMessage =
+        "Wait For OS Boot needs the QEMU Guest Agent: enable it on the VM (Create VM's 'Enable QEMU Agent') and install it in the guest.";
+
+    // Waits until the QEMU Guest Agent answers a ping, checking every 5 seconds. The agent is a
+    // service, so it only answers once the guest OS has booted. For a reboot, pass startedAfterUtc:
+    // until the VM's uptime shows it was started after that moment, an answer could still come
+    // from the old boot. False when timeoutSeconds passes first (0 = no limit).
+    public bool WaitForGuestAgent(string node, int vmId, int timeoutSeconds, DateTime? startedAfterUtc = null)
+    {
+        var deadline = timeoutSeconds > 0 ? DateTime.UtcNow.AddSeconds(timeoutSeconds) : DateTime.MaxValue;
+        while (true)
+        {
+            if ((startedAfterUtc == null || StartedSince(node, vmId, startedAfterUtc.Value)) && GuestAgentResponds(node, vmId))
+                return true;
+
+            if (DateTime.UtcNow >= deadline)
+                return false;
+            System.Threading.Thread.Sleep(5000);
+        }
+    }
+
+    // One ping. A missing permission throws, since it would otherwise look like "agent not running".
+    public bool GuestAgentResponds(string node, int vmId)
+    {
+        try
+        {
+            Post($"/nodes/{node}/qemu/{vmId}/agent/ping");
+            return true;
+        }
+        catch (Exception e) when (e.Message.Contains("(Forbidden)"))
+        {
+            throw new Exception("No permission to query the QEMU Guest Agent (needs VM.Monitor on PVE 8, VM.GuestAgent.Audit on PVE 9).", e);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // Starts a program in the guest through the agent (as SYSTEM / root) and returns its PID.
+    // inputData is passed to the program's stdin.
+    public int GuestExec(string node, int vmId, IEnumerable<string> command, string? inputData)
+    {
+        var form = command.Select(part => new KeyValuePair<string, string>("command", part)).ToList();
+        if (!string.IsNullOrEmpty(inputData))
+            form.Add(new KeyValuePair<string, string>("input-data", inputData));
+
+        using var doc = JsonDocument.Parse(Post($"/nodes/{node}/qemu/{vmId}/agent/exec", form));
+        return ProxmoxJson.Int(doc.RootElement, "pid") ?? throw new Exception("The guest agent didn't return a process ID.");
+    }
+
+    // Polls the process every second until it exits. Null when timeoutSeconds passes first
+    // (0 = no limit); the process keeps running in the guest.
+    public GuestExecResult? WaitForGuestExec(string node, int vmId, int pid, int timeoutSeconds)
+    {
+        var deadline = timeoutSeconds > 0 ? DateTime.UtcNow.AddSeconds(timeoutSeconds) : DateTime.MaxValue;
+        while (true)
+        {
+            var status = Get($"/nodes/{node}/qemu/{vmId}/agent/exec-status?pid={pid}");
+            if (ProxmoxJson.Bool(status, "exited") == true)
+            {
+                return new GuestExecResult
+                {
+                    // No exit code means the process was killed (signal / exception code instead)
+                    ExitCode = ProxmoxJson.Int(status, "exitcode") ?? -1,
+                    Output = ProxmoxJson.Str(status, "out-data") ?? string.Empty,
+                    ErrorOutput = ProxmoxJson.Str(status, "err-data") ?? string.Empty,
+                    Truncated = ProxmoxJson.Bool(status, "out-truncated") == true || ProxmoxJson.Bool(status, "err-truncated") == true,
+                };
+            }
+
+            if (DateTime.UtcNow >= deadline)
+                return null;
+            System.Threading.Thread.Sleep(1000);
+        }
+    }
+
+    // Uptime is the QEMU process's, which restarts with a Proxmox reboot (full shutdown + start).
+    // Comparing durations avoids any clock difference between Decisions and the node.
+    private bool StartedSince(string node, int vmId, DateTime sinceUtc)
+    {
+        var status = Get($"/nodes/{node}/qemu/{vmId}/status/current");
+        if (ProxmoxJson.Str(status, "status") != "running") return false;
+        var uptime = ProxmoxJson.Long(status, "uptime");
+        return uptime.HasValue && uptime.Value <= (DateTime.UtcNow - sinceUtc).TotalSeconds + 2;
     }
 
     public void Dispose() => _httpClient.Dispose();

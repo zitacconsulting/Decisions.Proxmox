@@ -9,6 +9,8 @@ namespace Zitac.Proxmox.Steps;
 
 // Changes only the settings that are provided; everything else on the NIC (MAC, model,
 // firewall, VLAN, queues, mtu, rate, ...) is read from the VM and written back unchanged.
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Update VM Network", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class UpdateVMNetwork : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep

@@ -7,6 +7,8 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Get VM By ID", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class GetVMByID : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
@@ -16,9 +18,6 @@ public class GetVMByID : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
 
     [WritableValue]
     private int port = 8006;
-
-    [WritableValue]
-    private bool fetchExtendedInfo;
 
     [WritableValue]
     private bool useApiToken;
@@ -36,13 +35,6 @@ public class GetVMByID : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
     [PropertyClassification(1, "Port", new string[] { "Settings" })]
     public int Port { get { return port; } set { port = value; } }
 
-    [PropertyClassification(2, "Fetch Extended Info", new string[] { "Settings" })]
-    public bool FetchExtendedInfo
-    {
-        get { return fetchExtendedInfo; }
-        set { fetchExtendedInfo = value; this.OnPropertyChanged("OutcomeScenarios"); }
-    }
-
     public IInputMapping[] DefaultInputs => new IInputMapping[]
     {
         new IgnoreInputMapping { InputDataName = "Node" },
@@ -58,19 +50,12 @@ public class GetVMByID : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(int)), "VM ID"),
     };
 
-    public override OutcomeScenarioData[] OutcomeScenarios
+    public override OutcomeScenarioData[] OutcomeScenarios => new[]
     {
-        get
-        {
-            var vmType = fetchExtendedInfo ? typeof(ProxmoxVMExtended) : typeof(ProxmoxVM);
-            return new[]
-            {
-                new OutcomeScenarioData("Done", new DataDescription(vmType, "VM", false)),
-                new OutcomeScenarioData("Not Found"),
-                new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")),
-            };
-        }
-    }
+        new OutcomeScenarioData("Done", new DataDescription(typeof(ProxmoxVM), "VM", false)),
+        new OutcomeScenarioData("Not Found"),
+        new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")),
+    };
 
     public ResultData Run(StepStartData data)
     {
@@ -84,37 +69,18 @@ public class GetVMByID : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
             using var client = new ProxmoxClient(hostname!, port, ignoreSSLErrors);
             client.Authenticate(credentials);
 
-            if (string.IsNullOrEmpty(node))
-            {
-                node = client.TryFindNodeForVM(vmId);
-                if (node == null) return new ResultData("Not Found");
-            }
-
-            try
-            {
-                var vm = BuildVM(client, node, vmId);
-                return new ResultData("Done", new Dictionary<string, object> { { "VM", vm } });
-            }
-            catch
-            {
+            // Only a VM that isn't in the cluster (or on a different node than the one given) is
+            // "Not Found"; auth, permission and network errors go to the Error outcome.
+            var actualNode = client.TryFindNodeForVM(vmId);
+            if (actualNode == null || (!string.IsNullOrEmpty(node) && !string.Equals(actualNode, node, StringComparison.OrdinalIgnoreCase)))
                 return new ResultData("Not Found");
-            }
+
+            var vm = ProxmoxVM.Load(client, actualNode, vmId);
+            return new ResultData("Done", new Dictionary<string, object> { { "VM", vm } });
         }
         catch (Exception e)
         {
             return new ResultData("Error", new Dictionary<string, object> { { "Error Message", e.ToString() } });
         }
-    }
-
-    private ProxmoxVM BuildVM(ProxmoxClient client, string node, int vmId)
-    {
-        var status = client.Get($"/nodes/{node}/qemu/{vmId}/status/current");
-        if (fetchExtendedInfo)
-        {
-            var vm = ProxmoxVMExtended.FromJson(status, node);
-            vm.ApplyConfig(client.Get($"/nodes/{node}/qemu/{vmId}/config"));
-            return vm;
-        }
-        return ProxmoxVM.FromJson(status, node);
     }
 }

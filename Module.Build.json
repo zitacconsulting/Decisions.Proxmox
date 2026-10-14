@@ -17,7 +17,7 @@
         "ObjectsToImport": null,
         "MsSqlScript": null
     },
-    "Version": "9.19.0",
+    "Version": "9.31.0",
     "ImagePath": "proxmox.svg",
     "Description": "This module adds steps to integrate with Proxmox VE"
 }

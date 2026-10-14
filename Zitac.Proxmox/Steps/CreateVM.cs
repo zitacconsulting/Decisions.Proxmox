@@ -1,5 +1,7 @@
+using DecisionsFramework;
 using DecisionsFramework.Design.Flow;
 using DecisionsFramework.Design.Properties;
+using DecisionsFramework.Design.Properties.Attributes;
 using DecisionsFramework.Design.ConfigurationStorage.Attributes;
 using DecisionsFramework.Design.Flow.Mapping;
 using DecisionsFramework.Design.Flow.CoreSteps;
@@ -7,9 +9,11 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Create VM", "Integration", "Proxmox", "VMs")]
 [Writable]
-public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
+public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep, IInputMappingValidationProvider
 {
     [WritableValue]
     private bool ignoreSSLErrors;
@@ -55,13 +59,29 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         set { showWarningsOutcome = value; this.OnPropertyChanged("OutcomeScenarios"); }
     }
 
+    // Read-only help texts, shown next to the inputs they describe
+    [InfoOrWarningEditor(false, null, true)]
+    [PropertyClassification(new string[] { VMHardwareInputs.CpuCategory }, "CPU Info", 0)]
+    public string CpuNote { get => VMHardwareInputs.CreateCpuNote; set { } }
+
+    [InfoOrWarningEditor(false, null, true)]
+    [PropertyClassification(new string[] { VMHardwareInputs.MemoryCategory }, "Memory Info", 0)]
+    public string MemoryNote { get => VMHardwareInputs.CreateMemoryNote; set { } }
+
+    [InfoOrWarningEditor(false, null, true)]
+    [PropertyClassification(new string[] { VMHardwareInputs.MachineCategory }, "Machine Type Info", 0)]
+    public string MachineNote { get => VMHardwareInputs.MachineNote; set { } }
+
+    [InfoOrWarningEditor(false, VMHardwareInputs.ProxmoxApiViewer, true)]
+    [PropertyClassification(new string[] { VMHardwareInputs.ExtraConfigCategory }, "Extra Config Info", 0)]
+    public string ExtraConfigNote { get => VMHardwareInputs.ExtraConfigNote; set { } }
+
     public IInputMapping[] DefaultInputs => new IInputMapping[]
     {
         new IgnoreInputMapping { InputDataName = "VM ID" },
         new IgnoreInputMapping { InputDataName = "ISO Images" },
         new IgnoreInputMapping { InputDataName = "Description" },
         new IgnoreInputMapping { InputDataName = "Tags" },
-        new ConstantInputMapping { InputDataName = "CPU Sockets", Value = 1 },
         new ConstantInputMapping { InputDataName = "OS Type", Value = OsType.Linux_6x_2_6_Kernel },
         new ConstantInputMapping { InputDataName = "BIOS Type", Value = BiosType.SeaBIOS },
         new ConstantInputMapping { InputDataName = "Network Model", Value = NetworkModel.VirtIO },
@@ -69,7 +89,7 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         new ConstantInputMapping { InputDataName = "Network Bridge", Value = "vmbr0" },
         new ConstantInputMapping { InputDataName = "Start On Boot", Value = false },
         new ConstantInputMapping { InputDataName = "Enable QEMU Agent", Value = false },
-    };
+    }.Concat(VMHardwareInputs.CreateDefaultInputs()).ToArray();
 
     public DataDescription[] InputData => new[]
     {
@@ -80,9 +100,6 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Node"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(int)), "VM ID"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "VM Name"),
-        new DataDescription((DecisionsType)new DecisionsNativeType(typeof(int)), "Memory (MB)"),
-        new DataDescription((DecisionsType)new DecisionsNativeType(typeof(int)), "CPU Cores"),
-        new DataDescription((DecisionsType)new DecisionsNativeType(typeof(int)), "CPU Sockets"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(OsType)), "OS Type"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(BiosType)), "BIOS Type"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Storage"),
@@ -95,7 +112,7 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(bool)), "Enable QEMU Agent"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Description"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Tags"),
-    };
+    }.Concat(VMHardwareInputs.InputData()).ToArray();
 
     public override OutcomeScenarioData[] OutcomeScenarios
     {
@@ -108,6 +125,9 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         }
     }
 
+    public ValidationIssue[] GetInputMappingValidationIssues(IInputMapping inputMapping) =>
+        VMHardwareInputs.CreateMappingIssues(inputMapping);
+
     public ResultData Run(StepStartData data)
     {
         var hostname = data.Data["Hostname"] as string;
@@ -115,9 +135,6 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         var node = data.Data["Node"] as string;
         var vmId = data.Data["VM ID"] as int? ?? 0;
         var vmName = data.Data["VM Name"] as string;
-        var memoryMb = data.Data["Memory (MB)"] as int? ?? 1024;
-        var cpuCores = data.Data["CPU Cores"] as int? ?? 1;
-        var cpuSockets = data.Data["CPU Sockets"] as int? ?? 1;
         var osType = (OsType)(data.Data["OS Type"] ?? OsType.Linux_6x_2_6_Kernel);
         var biosType = (BiosType)(data.Data["BIOS Type"] ?? BiosType.SeaBIOS);
         var storage = data.Data["Storage"] as string;
@@ -130,6 +147,16 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         var enableAgent = data.Data["Enable QEMU Agent"] as bool? ?? false;
         var description = data.Data["Description"] as string;
         var tags = data.Data["Tags"] as string;
+
+        // Also flagged in the designer, but a mapped value can still be empty or 0 at runtime
+        var cpuSettings = VMHardwareInputs.Cpu(data);
+        var memorySettings = VMHardwareInputs.Memory(data);
+        var missing = new List<string>();
+        if (cpuSettings?.Sockets is not > 0) missing.Add("CPU.Sockets");
+        if (cpuSettings?.Cores is not > 0) missing.Add("CPU.Cores");
+        if (memorySettings?.MemoryMB is not > 0) missing.Add("Memory.MemoryMB");
+        if (missing.Count > 0)
+            return new ResultData("Error", new Dictionary<string, object> { { "Error Message", $"Required input missing or not greater than 0: {string.Join(", ", missing)}" } });
 
         try
         {
@@ -146,17 +173,24 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
             {
                 { "vmid",    vmId.ToString() },
                 { "name",    vmName! },
-                { "memory",  memoryMb.ToString() },
-                { "cores",   cpuCores.ToString() },
-                { "sockets", cpuSockets.ToString() },
                 { "ostype",  MapOsType(osType) },
                 { "bios",    biosType == BiosType.OVMF_UEFI ? "ovmf" : "seabios" },
-                { "scsihw",  MapScsiController(scsiController) },
+                { "scsihw",  scsiController.ToProxmox() },
                 { "scsi0",   $"{storage}:{diskSizeGb}" },
                 { "net0",    $"{networkModel.ToProxmox()},bridge={networkBridge}" },
                 { "onboot",  startOnBoot ? "1" : "0" },
                 { "agent",   enableAgent ? "enabled=1" : "enabled=0" },
             };
+
+            // Unset optional CPU fields fall back to Proxmox defaults and the GUI's CPU type
+            foreach (var kv in cpuSettings!.ToConfig(isCreate: true))
+                postData[kv.Key] = kv.Value;
+            foreach (var kv in memorySettings!.ToConfig())
+                postData[kv.Key] = kv.Value;
+
+            var machine = VMHardwareInputs.Machine(data);
+            if (machine != null)
+                postData["machine"] = machine;
 
             if (biosType == BiosType.OVMF_UEFI)
                 postData["efidisk0"] = $"{storage}:1,efitype=4m,pre-enrolled-keys=1";
@@ -187,13 +221,14 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
             if (!string.IsNullOrEmpty(tags))
                 postData["tags"] = tags;
 
+            VMHardwareInputs.ApplyExtraConfig(data, postData);
+
             var upid = client.Post($"/nodes/{node}/qemu", postData);
             var warnings = Array.Empty<string>();
             if (waitForTask && !string.IsNullOrEmpty(upid))
                 warnings = client.WaitForTask(node!, upid, taskTimeoutSeconds);
 
-            var status = client.Get($"/nodes/{node}/qemu/{vmId}/status/current");
-            var vm = ProxmoxVM.FromJson(status, node!);
+            var vm = ProxmoxVM.Load(client, node!, vmId);
 
             if (showWarningsOutcome && warnings.Length > 0)
                 return new ResultData("Done With Warnings", new Dictionary<string, object> { { "VM", vm }, { "Warnings", warnings } });
@@ -220,14 +255,5 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         _                             => "other",
     };
 
-    private static string MapScsiController(ScsiController controller) => controller switch
-    {
-        ScsiController.VirtIOScsiPci    => "virtio-scsi-pci",
-        ScsiController.VirtIOScsiSingle => "virtio-scsi-single",
-        ScsiController.LSI              => "lsi",
-        ScsiController.MegaRAID         => "megasas",
-        ScsiController.ParaVirtual      => "pvscsi",
-        _                               => "virtio-scsi-pci",
-    };
 
 }

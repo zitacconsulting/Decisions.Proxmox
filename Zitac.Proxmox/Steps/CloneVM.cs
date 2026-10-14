@@ -1,5 +1,6 @@
 using DecisionsFramework.Design.Flow;
 using DecisionsFramework.Design.Properties;
+using DecisionsFramework.Design.Properties.Attributes;
 using DecisionsFramework.Design.ConfigurationStorage.Attributes;
 using DecisionsFramework.Design.Flow.Mapping;
 using DecisionsFramework.Design.Flow.CoreSteps;
@@ -7,6 +8,8 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Clone VM", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class CloneVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
@@ -61,13 +64,34 @@ public class CloneVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduce
     [PropertyClassification(4, "Full Clone (vs Linked Clone)", new string[] { "Settings" })]
     public bool FullClone { get { return fullClone; } set { fullClone = value; } }
 
+    // Read-only help texts, shown next to the inputs they describe
+    [InfoOrWarningEditor(false, null, true)]
+    [PropertyClassification(new string[] { VMHardwareInputs.CpuCategory }, "CPU Info", 0)]
+    public string CpuNote { get => VMHardwareInputs.CloneCpuNote; set { } }
+
+    [InfoOrWarningEditor(false, null, true)]
+    [PropertyClassification(new string[] { VMHardwareInputs.MemoryCategory }, "Memory Info", 0)]
+    public string MemoryNote { get => VMHardwareInputs.CloneMemoryNote; set { } }
+
+    [InfoOrWarningEditor(false, null, true)]
+    [PropertyClassification(new string[] { VMHardwareInputs.MachineCategory }, "Machine Type Info", 0)]
+    public string MachineNote { get => VMHardwareInputs.MachineNote; set { } }
+
+    [InfoOrWarningEditor(false, VMHardwareInputs.ProxmoxApiViewer, true)]
+    [PropertyClassification(new string[] { VMHardwareInputs.ExtraConfigCategory }, "Extra Config Info", 0)]
+    public string ExtraConfigNote { get => VMHardwareInputs.ExtraConfigNote; set { } }
+
+    [InfoOrWarningEditor(false, null, true)]
+    [PropertyClassification(new string[] { VMHardwareInputs.HardwareChangesCategory }, "Applying Changes Info", 0)]
+    public string ApplyNote { get => VMHardwareInputs.CloneApplyNote; set { } }
+
     public IInputMapping[] DefaultInputs => new IInputMapping[]
     {
         new IgnoreInputMapping { InputDataName = "Node" },
         new IgnoreInputMapping { InputDataName = "New VM ID" },
         new IgnoreInputMapping { InputDataName = "Target Node" },
         new IgnoreInputMapping { InputDataName = "Target Storage" },
-    };
+    }.Concat(VMHardwareInputs.CloneDefaultInputs()).ToArray();
 
     public DataDescription[] InputData => new[]
     {
@@ -81,7 +105,7 @@ public class CloneVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduce
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "New VM Name"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Target Node"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Target Storage"),
-    };
+    }.Concat(VMHardwareInputs.InputData()).ToArray();
 
     public override OutcomeScenarioData[] OutcomeScenarios
     {
@@ -111,19 +135,56 @@ public class CloneVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduce
             client.Authenticate(credentials);
             if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
 
+            // Proxmox requires newid, so pick the next free ID when none is given
+            if (newVmId <= 0)
+                newVmId = int.Parse(client.Get("/cluster/nextid").GetString()!);
+
             var postData = new Dictionary<string, string>
             {
-                { "newid", newVmId > 0 ? newVmId.ToString() : "0" },
+                { "newid", newVmId.ToString() },
                 { "full", fullClone ? "1" : "0" },
             };
             if (!string.IsNullOrEmpty(newVmName)) postData["name"] = newVmName;
             if (!string.IsNullOrEmpty(targetNode)) postData["target"] = targetNode;
             if (!string.IsNullOrEmpty(targetStorage)) postData["storage"] = targetStorage;
 
+            // Hardware changes are applied to the clone afterwards. Unset inputs and fields keep
+            // the source VM's values (no GUI default is forced here, unlike Create VM).
+            var cpuSettings = VMHardwareInputs.Cpu(data);
+            var config = cpuSettings?.ToConfig(isCreate: false) ?? new Dictionary<string, string>();
+
+            // A CPU type/flags change rewrites the whole "cpu" line; it's rebuilt from the
+            // clone's current line below so its other CPU options are kept
+            config.Remove("cpu");
+
+            foreach (var kv in VMHardwareInputs.Memory(data)?.ToConfig() ?? new Dictionary<string, string>())
+                config[kv.Key] = kv.Value;
+
+            var machine = VMHardwareInputs.Machine(data);
+            if (machine != null) config["machine"] = machine;
+            VMHardwareInputs.ApplyExtraConfig(data, config);
+
+            // A "cpu" key in Extra Config wins over the CPU input
+            var mergeCpu = cpuSettings?.ChangesCpu == true && !config.ContainsKey("cpu");
+            var updateConfig = config.Count > 0 || mergeCpu;
+
             var upid = client.Post($"/nodes/{node}/qemu/{vmId}/clone", postData);
             var warnings = Array.Empty<string>();
-            if (waitForTask && !string.IsNullOrEmpty(upid))
+
+            // The clone is locked until its task ends, so config changes force a wait
+            if ((waitForTask || updateConfig) && !string.IsNullOrEmpty(upid))
                 warnings = client.WaitForTask(node!, upid, taskTimeoutSeconds);
+
+            if (updateConfig)
+            {
+                var cloneNode = string.IsNullOrEmpty(targetNode) ? node : targetNode;
+                if (mergeCpu)
+                {
+                    var current = client.Get($"/nodes/{cloneNode}/qemu/{newVmId}/config");
+                    config["cpu"] = cpuSettings!.ToConfig(isCreate: false, ProxmoxJson.Str(current, "cpu"))["cpu"];
+                }
+                client.Put($"/nodes/{cloneNode}/qemu/{newVmId}/config", config);
+            }
 
             if (showWarningsOutcome && warnings.Length > 0)
                 return new ResultData("Done With Warnings", new Dictionary<string, object> { { "New VM ID", newVmId }, { "Warnings", warnings } });

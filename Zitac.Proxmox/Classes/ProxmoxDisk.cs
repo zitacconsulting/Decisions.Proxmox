@@ -8,38 +8,55 @@ namespace Zitac.Proxmox.Steps;
 public class ProxmoxDisk
 {
     [DataMember] public string? Interface { get; set; }
+
+    // From the interface name (scsi0 = scsi). SCSI disks use the VM's SCSIController.
+    [DataMember] public DiskBus Bus { get; set; }
     [DataMember] public string? Storage { get; set; }
     [DataMember] public string? VolumeName { get; set; }
-    [DataMember] public string? Size { get; set; }
+    [DataMember] public double? SizeGB { get; set; }
+    [DataMember] public string? Format { get; set; }
+    [DataMember] public string? Cache { get; set; }
+    [DataMember] public bool SSD { get; set; }
+    [DataMember] public bool Discard { get; set; }
+    [DataMember] public bool IOThread { get; set; }
+    [DataMember] public bool Backup { get; set; } = true;
 
     public ProxmoxDisk() { }
 
-    public static ProxmoxDisk? Parse(string interfaceName, string raw)
+    public static ProxmoxDisk Parse(string interfaceName, string raw)
     {
-        if (raw.Contains("media=cdrom") || raw.Contains("media=disk") && raw.Contains("iso"))
-            return null;
+        var (positional, options) = ProxmoxJson.ParsePropertyString(raw);
+        var result = new ProxmoxDisk
+        {
+            Interface = interfaceName,
+            Bus = Enum.TryParse<DiskBus>(interfaceName.TrimEnd("0123456789".ToCharArray()), out var bus) ? bus : DiskBus.scsi,
+        };
 
-        var result = new ProxmoxDisk { Interface = interfaceName };
-        var parts = raw.Split(',');
-        var volumePart = parts[0];
-        var colon = volumePart.IndexOf(':');
-        if (colon >= 0)
+        // The volume may be positional or given as file=/volume=
+        var volume = positional.FirstOrDefault()
+                     ?? (options.TryGetValue("file", out var f) ? f : options.GetValueOrDefault("volume"));
+        if (volume != null)
         {
-            result.Storage = volumePart[..colon];
-            result.VolumeName = volumePart[(colon + 1)..];
-        }
-        else
-        {
-            result.Storage = volumePart;
+            var colon = volume.IndexOf(':');
+            if (colon >= 0)
+            {
+                result.Storage = volume[..colon];
+                result.VolumeName = volume[(colon + 1)..];
+            }
+            else
+            {
+                // Passthrough of a host device, e.g. /dev/sdb
+                result.VolumeName = volume;
+            }
         }
 
-        foreach (var part in parts[1..])
-        {
-            var eq = part.IndexOf('=');
-            if (eq < 0) continue;
-            if (part[..eq] == "size")
-                result.Size = part[(eq + 1)..];
-        }
+        result.SizeGB = ProxmoxJson.SizeToGB(options.GetValueOrDefault("size"));
+        result.Format = options.GetValueOrDefault("format");
+        result.Cache = options.GetValueOrDefault("cache");
+        result.SSD = options.GetValueOrDefault("ssd") == "1";
+        result.Discard = options.GetValueOrDefault("discard") == "on";
+        result.IOThread = options.GetValueOrDefault("iothread") == "1";
+        result.Backup = options.GetValueOrDefault("backup") != "0";
         return result;
     }
 }

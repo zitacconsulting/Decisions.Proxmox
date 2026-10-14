@@ -1,5 +1,3 @@
-using System.Text.Json;
-using System.Text.RegularExpressions;
 using DecisionsFramework.Design.Flow;
 using DecisionsFramework.Design.Properties;
 using DecisionsFramework.Design.ConfigurationStorage.Attributes;
@@ -9,12 +7,12 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Get VM Networks", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class GetVMNetworks : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
 {
-    private static readonly Regex NetKey = new(@"^net\d+$", RegexOptions.Compiled);
-
     [WritableValue] private bool ignoreSSLErrors;
     [WritableValue] private int port = 8006;
     [WritableValue] private bool useApiToken;
@@ -63,14 +61,8 @@ public class GetVMNetworks : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataP
             if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
 
             var config = client.Get($"/nodes/{node}/qemu/{vmId}/config");
-            var nets = new List<ProxmoxNetworkInterface>();
-            foreach (var prop in config.EnumerateObject())
-            {
-                if (prop.Value.ValueKind != JsonValueKind.String) continue;
-                if (NetKey.IsMatch(prop.Name))
-                    nets.Add(ProxmoxNetworkInterface.Parse(prop.Name, prop.Value.GetString()!));
-            }
-            return new ResultData("Done", new Dictionary<string, object> { { "Networks", nets.ToArray() } });
+            var nets = ProxmoxVMConfig.NICs(config);
+            return new ResultData("Done", new Dictionary<string, object> { { "Networks", nets } });
         }
         catch (Exception e)
         {

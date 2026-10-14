@@ -7,6 +7,8 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Power Off VM", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class PowerOffVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
@@ -28,6 +30,9 @@ public class PowerOffVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProd
 
     [WritableValue]
     private bool forceStop;
+
+    [WritableValue]
+    private bool showNotRunning;
 
     [WritableValue]
     private bool useApiToken;
@@ -61,6 +66,13 @@ public class PowerOffVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProd
     [PropertyClassification(4, "Force Stop (Skip ACPI Shutdown)", new string[] { "Settings" })]
     public bool ForceStop { get { return forceStop; } set { forceStop = value; } }
 
+    [PropertyClassification(6, "Show Outcome for 'Not Running'", new string[] { "Settings" })]
+    public bool ShowNotRunning
+    {
+        get { return showNotRunning; }
+        set { showNotRunning = value; this.OnPropertyChanged("OutcomeScenarios"); }
+    }
+
     public IInputMapping[] DefaultInputs => new IInputMapping[]
     {
         new IgnoreInputMapping { InputDataName = "Node" },
@@ -82,6 +94,7 @@ public class PowerOffVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProd
         {
             var outcomes = new List<OutcomeScenarioData> { new OutcomeScenarioData("Done") };
             if (showWarningsOutcome) outcomes.Add(new OutcomeScenarioData("Done With Warnings", new DataDescription(typeof(string), "Warnings", true)));
+            if (showNotRunning) outcomes.Add(new OutcomeScenarioData("Not Running"));
             outcomes.Add(new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")));
             return outcomes.ToArray();
         }
@@ -99,6 +112,15 @@ public class PowerOffVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProd
             using var client = new ProxmoxClient(hostname!, port, ignoreSSLErrors);
             client.Authenticate(credentials);
             if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
+
+            // "status" is the QEMU process state: a paused VM counts as running (and can be stopped),
+            // a hibernated one as stopped
+            if (showNotRunning)
+            {
+                var status = client.Get($"/nodes/{node}/qemu/{vmId}/status/current");
+                if (status.TryGetProperty("status", out var st) && st.GetString() == "stopped")
+                    return new ResultData("Not Running");
+            }
 
             var action = forceStop ? "stop" : "shutdown";
             var upid = client.Post($"/nodes/{node}/qemu/{vmId}/status/{action}");

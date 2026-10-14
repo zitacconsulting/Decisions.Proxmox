@@ -7,6 +7,8 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
+[CategoryClassification(StepCategories.AuthenticationSortKey, StepCategories.Authentication)]
+[CategoryClassification(StepCategories.SettingsSortKey, StepCategories.Settings)]
 [AutoRegisterStep("Power On VM", "Integration", "Proxmox", "VMs")]
 [Writable]
 public class PowerOnVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProducer, IDefaultInputMappingStep
@@ -28,6 +30,12 @@ public class PowerOnVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
 
     [WritableValue]
     private bool showAlreadyRunning;
+
+    [WritableValue]
+    private bool waitForOsBoot;
+
+    [WritableValue]
+    private int osBootTimeoutSeconds = 600;
 
     [WritableValue]
     private bool useApiToken;
@@ -65,6 +73,18 @@ public class PowerOnVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
         set { showWarningsOutcome = value; this.OnPropertyChanged("OutcomeScenarios"); }
     }
 
+    // Like VMware's "Wait For OS Boot": done once the QEMU Guest Agent inside the guest answers
+    [PropertyClassification(6, "Wait For OS Boot (Requires QEMU Guest Agent)", new string[] { "Settings" })]
+    public bool WaitForOsBoot
+    {
+        get { return waitForOsBoot; }
+        set { waitForOsBoot = value; this.OnPropertyChanged(nameof(WaitForOsBoot)); this.OnPropertyChanged("OutcomeScenarios"); }
+    }
+
+    [BooleanPropertyHidden(nameof(WaitForOsBoot), false)]
+    [PropertyClassification(7, "OS Boot Timeout (Seconds, 0 = No Limit)", new string[] { "Settings" })]
+    public int OsBootTimeoutSeconds { get { return osBootTimeoutSeconds; } set { osBootTimeoutSeconds = value; } }
+
     public IInputMapping[] DefaultInputs => new IInputMapping[]
     {
         new IgnoreInputMapping { InputDataName = "Node" },
@@ -87,6 +107,7 @@ public class PowerOnVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
             var outcomes = new List<OutcomeScenarioData> { new OutcomeScenarioData("Done") };
             if (showWarningsOutcome) outcomes.Add(new OutcomeScenarioData("Done With Warnings", new DataDescription(typeof(string), "Warnings", true)));
             if (showAlreadyRunning) outcomes.Add(new OutcomeScenarioData("Already Running"));
+            if (waitForOsBoot) outcomes.Add(new OutcomeScenarioData("Timeout"));
             outcomes.Add(new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")));
             return outcomes.ToArray();
         }
@@ -114,8 +135,20 @@ public class PowerOnVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProdu
 
             var upid = client.Post($"/nodes/{node}/qemu/{vmId}/status/start");
             var warnings = Array.Empty<string>();
-            if (waitForTask && !string.IsNullOrEmpty(upid))
+
+            // Waiting for the OS only makes sense once the start task itself has finished
+            if ((waitForTask || waitForOsBoot) && !string.IsNullOrEmpty(upid))
                 warnings = client.WaitForTask(node!, upid, taskTimeoutSeconds);
+
+            if (waitForOsBoot)
+            {
+                // Without the agent enabled there's nothing to wait for; fail now instead of at the timeout
+                if (!ProxmoxVMConfig.AgentEnabled(client.Get($"/nodes/{node}/qemu/{vmId}/config")))
+                    return new ResultData("Error", new Dictionary<string, object> { { "Error Message", ProxmoxClient.GuestAgentRequiredMessage } });
+
+                if (!client.WaitForGuestAgent(node!, vmId, osBootTimeoutSeconds))
+                    return new ResultData("Timeout");
+            }
 
             if (showWarningsOutcome && warnings.Length > 0)
                 return new ResultData("Done With Warnings", new Dictionary<string, object> { { "Warnings", warnings } });

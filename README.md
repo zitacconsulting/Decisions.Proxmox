@@ -21,19 +21,28 @@
 
 ## Features
 
-This module provides 31 Decisions workflow steps organized under `Integration/Proxmox`:
+This module provides 37 Decisions workflow steps organized under `Integration/Proxmox`:
 
 ### Virtual Machine Lifecycle
-- `GetAllVMs` - List all virtual machines across nodes, with optional extended info (network, disk, mounted ISOs)
-- `GetVMByID` - Get VM details by ID, with optional extended info
+- `GetAllVMs` - List all virtual machines in the cluster (or on one node), with optional extended info (disks, CD-ROMs, NICs, guest agent)
+- `GetVMByID` - Get a VM with full details by ID
+- `GetVMByName` - Get a VM with full details by name (`Multiple Found` outcome when names collide)
 - `CreateVM` - Create a new virtual machine with full hardware configuration
 - `DeleteVM` - Remove a virtual machine
-- `PowerOnVM` - Power on a virtual machine
-- `PowerOffVM` - Power off a virtual machine
-- `RebootVM` - Restart a virtual machine
+- `PowerOnVM` - Power on a virtual machine, optional `Already Running` outcome. *Wait For OS Boot* waits until the QEMU Guest Agent inside the guest answers (`Timeout` outcome after *OS Boot Timeout*); the agent must be enabled on the VM and installed in the guest.
+- `PowerOffVM` - Shut down a virtual machine (graceful by default, hard stop with Force Stop), optional `Not Running` outcome
+- `RebootVM` - Restart a virtual machine (full shutdown and start, so pending changes are applied). Same *Wait For OS Boot* option as `PowerOnVM`; it only counts an agent answer from after the reboot.
 - `SuspendVM` - Suspend a virtual machine
 - `ResumeVM` - Resume a suspended virtual machine
-- `CloneVM` - Clone an existing virtual machine
+- `CloneVM` - Clone an existing virtual machine, optionally changing CPU/machine type or any other setting on the clone
+
+### Guest Execution (QEMU Guest Agent)
+- `RunScriptOnVM` - Run a PowerShell, Cmd, Bash or Sh script inside the guest
+- `RunCommandOnVM` - Run a program with an argument list (and optional stdin) inside the guest
+
+Both run as **SYSTEM** (Windows) or **root** (Linux) through the QEMU Guest Agent; no guest login is used. They need the agent enabled on the VM and running in the guest. Settings: *Wait For Execution*, *Timeout* (`Timeout` outcome; the process keeps running in the guest), *Capture Output*, *Show Outcome for 'Not Running'* (VM stopped, agent disabled or not responding). Outputs: `PID`, and when waiting `Exit Code`, `Output` (stdout), `Error Output` (stderr), `Output Truncated`.
+
+How scripts are passed: PowerShell with `-EncodedCommand` (about 12,000 characters max), Cmd as a temporary `.cmd` file with `@echo off` run through PowerShell (about 9,000 characters max), Bash/Sh on stdin (no limit).
 
 ### Snapshot Management
 - `GetSnapshots` - List all snapshots for a VM
@@ -56,8 +65,9 @@ This module provides 31 Decisions workflow steps organized under `Integration/Pr
 
 ### ISO Management
 - `GetAllISOs` - List all ISO files available in Proxmox storage
-- `MountISO` - Mount an ISO to a VM (auto-selects the first free IDE slot)
-- `UnmountISO` - Unmount an ISO from a VM by slot
+- `MountISO` - Mount an ISO to a VM; returns a `ProxmoxCDROM`. Optional `Interface` (e.g. `ide2`): replaces the ISO in that CD drive, or creates a CD drive there if the slot is free. Ignored: loads the ISO into the first empty CD drive, otherwise adds a new drive in the first free IDE slot (`No Free Slot` when all four are used).
+- `UnmountISO` - Eject the ISO from a CD drive by `Interface`; the empty drive stays and is reused by `MountISO`
+- `RemoveCDROM` - Delete a CD drive by `Interface`
 
 ### Storage
 - `GetStorage` - List storage pools available on Proxmox nodes
@@ -69,11 +79,13 @@ This module provides 31 Decisions workflow steps organized under `Integration/Pr
 
 ### Nodes
 - `GetNodes` - List all nodes in the Proxmox cluster
+- `GetCPUTypes` - List the CPU types a node offers, including cluster-defined custom models
+- `GetMachineTypes` - List the machine types and versions a node's QEMU supports
 
 ## Requirements
 
 ### Platform Requirements
-- **Decisions Platform**: Version 9.0 or higher
+- **Decisions Platform**: Version 9.31 or higher
 - **.NET Runtime**: .NET 10.0
 - **Proxmox VE**: Version 7.0 or higher
 
@@ -89,6 +101,8 @@ The Proxmox user or API token requires appropriate privileges for intended opera
 - `VM.Snapshot` — create, delete, and revert snapshots
 - `Datastore.Audit` — list storage and ISO files
 - `Sys.Audit` — list nodes and network bridges
+- `VM.GuestAgent.Unrestricted` (PVE 9) / `VM.Monitor` (PVE 8) — `RunScriptOnVM` / `RunCommandOnVM`. This is effectively full admin/root inside the guest; grant it only to a dedicated token on the VMs that need it
+- `VM.Monitor` (PVE 8) / `VM.GuestAgent.Audit` (PVE 9) — read guest agent info (hostname, OS, IP addresses). Optional; without it `GuestAgent.Responding` is false
 
 > **Note:** For API token authentication, privileges must be explicitly granted via ACL even for `root@pam` tokens, as tokens use privilege separation by default.
 
@@ -113,7 +127,7 @@ Integration > Proxmox > [Category]
 
 ## Available Steps
 
-All 31 steps follow a consistent pattern:
+All 37 steps follow a consistent pattern:
 - **Node input is optional** on all VM/container steps — the module auto-discovers the correct node from the VM ID when left blank
 - **Connection** inputs (Hostname, Credentials) are grouped in a dedicated section
 - **Error** outcome on every step returns a descriptive error message string
@@ -140,13 +154,70 @@ Password: yourpassword
 ### Ignore SSL Errors
 Available on all steps. Enable for environments with self-signed certificates. Not recommended for production.
 
-### Fetch Extended Info (`GetAllVMs`, `GetVMByID`)
-When enabled, makes an additional `/config` API call per VM to populate:
-- `NetworkInterfaces` — bridge, model, MAC address, VLAN tag, firewall flag
-- `Disks` — storage pool, volume name, size
-- `MountedISOs` — slot, datastore, filename
+### Fetch Extended Info (`GetAllVMs`)
+Off (default): one `/cluster/resources` call returns every VM with name, node, power state, template flag, tags, CPUs, CPU usage, memory and uptime. Config fields and the `Disks`/`CDROMs`/`NICs` arrays are empty.
 
-Returns `ProxmoxVMExtended` instead of `ProxmoxVM` when enabled.
+On: each VM is also loaded in full like `GetVMByID`, which costs three or more API calls per VM. VMs on an offline node keep the summary.
+
+### Exclude Templates (`GetAllVMs`)
+Leaves VM templates out of the result.
+
+## VM Data Type (`ProxmoxVM`)
+Returned by `GetVMByID`, `GetVMByName`, `GetAllVMs` and `CreateVM`. Field names carry their unit (`MemoryMB`, `SizeGB`, `UptimeSeconds`, `CPUUsagePercent`).
+
+| Field | Description |
+|---|---|
+| `VMID`, `Name`, `Node`, `Notes`, `Tags[]` | Identity and description |
+| `PowerState`, `PowerStateDetail` | Enum: `Unknown` (node offline), `Running`, `Stopped`, `Paused` (Suspend VM), `Hibernated` (stopped with a `suspended` lock), `Starting`, `Migrating`, `Error` (I/O error, guest panic, watchdog), `Other`. `PowerStateDetail` is the raw Proxmox/QEMU state. Get All VMs without extended info only sees running/stopped, so a paused VM shows as `Running` there. |
+| `Template`, `StartOnBoot` | Flags |
+| `Locked`, `LockedBy`, `LockedByDetail` | `Locked` is true while an operation holds the VM and config changes are refused. `LockedBy` enum: `None`, `Backup`, `Clone`, `Create`, `Migrate`, `Snapshot`, `SnapshotDelete`, `Rollback`, `Hibernating`, `Hibernated`, `Other`. `LockedByDetail` is the raw Proxmox lock name. |
+| `OSType`, `BIOS`, `MachineType`, `UUID` | Proxmox `ostype` code (`l26`, `win11`, ...), `seabios`/`ovmf`, machine type, SMBIOS UUID |
+| `SCSIController` | Controller model for all SCSI disks: `VirtIOScsiPci`, `VirtIOScsiSingle`, `LSI` (Proxmox default), `LSI53C810`, `MegaRAID`, `ParaVirtual`. Proxmox has one per VM; disks aren't attached to a controller individually. |
+| `UEFI`, `TPMEnabled` | `UEFI` = BIOS is `ovmf`. `TPMEnabled` = the VM has a virtual TPM (`tpmstate0`). |
+| `CPUSockets`, `CPUCores`, `CPUs`, `CPUType`, `CPUUsagePercent` | `CPUs` is the total vCPU count |
+| `MemoryMB`, `MemoryUsedMB`, `BalloonMinMB` | Configured, currently used, and balloon minimum (0 = ballooning off) |
+| `UptimeSeconds` | |
+| `GuestAgent` | `Enabled`, `Responding`, `OSFullName`, `OSVersion`, `KernelRelease`, `Hostname`, `IPAddresses[]` (queried only for running VMs with the agent enabled) |
+| `Disks[]` (`ProxmoxDisk`) | Data disks only (the EFI disk and TPM state are left out). `Interface`, `Bus` (scsi / virtio / sata / ide), `Storage`, `VolumeName`, `SizeGB`, `Format`, `Cache`, `SSD`, `Discard`, `IOThread`, `Backup` |
+| `CDROMs[]` (`ProxmoxCDROM`) | `Interface`, `Type` (ISO / Physical / Empty), `Storage`, `FileName`, `VolumeID` |
+| `NICs[]` (`ProxmoxNetworkInterface`) | `Interface`, `Model`, `MacAddress`, `Bridge`, `VlanTag`, `Firewall`, `Connected`, `MTU`, `RateLimitMBps`, `Queues`, `IPAddresses[]` (from the guest agent, matched on MAC), `OtherOptions` |
+
+`ProxmoxContainer` (from `GetAllContainers`) uses the same naming: `PowerState` (same enum: Running, Stopped or Unknown), `PowerStateDetail`, `CPUs`, `CPUUsagePercent`, `MemoryMB`, `MemoryUsedMB`, `DiskSizeGB`, `DiskUsedGB`, `UptimeSeconds`, `Template`, `Tags[]`, `Locked`, `LockedBy`, `LockedByDetail` (container-only locks such as `disk`, `fstrim` or `mounted` show as `Other`).
+
+### CPU, Memory, Machine Type and Extra Config (`CreateVM`, `CloneVM`)
+On **Create VM**, `CPU` and `Memory` start as *Build Data* with `Sockets` = 1, `Cores` = 1 and `MemoryMB` = 2048 (the Proxmox GUI defaults) and every other field ignored. Those three fields and the two inputs themselves are required: the designer flags the step if they are ignored or null, and the step goes to *Error* if they are empty or 0 at runtime. On **Clone VM** everything is optional and ignored by default.
+
+**CPU** (`ProxmoxCPUSettings`), matching the Processor dialog in the Proxmox GUI:
+
+| Field | Notes |
+|---|---|
+| `Sockets`, `Cores` | |
+| `Type` | Dropdown: `Default`, x86-64-v2-AES, x86-64-v2/v3/v4, host, max, kvm64, qemu64 |
+| `CustomType` | Any other model, e.g. `EPYC-Genoa` or `custom-mymodel`. Overrides `Type`. |
+| `Flags` | Extra CPU flags, e.g. `+aes;-pcid` |
+| `VCPUs` | vCPUs active at boot when fewer than Sockets x Cores (hotplug) |
+| `LimitCores` | Max CPU time in whole cores, e.g. `2.5`. `0` = unlimited. |
+| `CPUUnits` | Scheduler weight relative to other VMs |
+| `Affinity` | Host cores the VM may run on, e.g. `0,5,8-11` |
+| `NUMA` | |
+
+**Memory** (`ProxmoxMemorySettings`), matching the Memory dialog in the Proxmox GUI:
+
+| Field | Notes |
+|---|---|
+| `MemoryMB` | |
+| `BalloonMinMB` | Minimum memory with ballooning. `0` = ballooning off. |
+| `Shares` | Auto-ballooning weight relative to other VMs (default 1000). `0` = no auto-ballooning. |
+
+**Machine Type** (dropdown `I440fx` / `Q35`) and **Machine Version** (text): e.g. Q35 + `11.0` gives `pc-q35-11.0`. Blank version = newest on the node. A full id from `GetMachineTypes` (`pc-q35-10.0+pve1`) is used as-is. A version without a type means i440fx.
+
+**Extra Config** (key/value list): any parameter from the [Proxmox API](https://pve.proxmox.com/pve-docs/api-viewer/) (`nodes/{node}/qemu`), e.g. `numa`=`1`, `ciuser`=`admin`. Applied last, so it overrides the step's own values. Proxmox rejects unknown keys and bad values with an error.
+
+Unset inputs and fields mean:
+- **Create VM**: Proxmox defaults (ballooning on, i440fx) and CPU type `x86-64-v2-AES`, the same default the Proxmox GUI uses. The API on its own would fall back to `kvm64`, so the step sends it explicitly.
+- **Clone VM**: the clone keeps the source VM's values. Changing `Type`/`CustomType`/`Flags` keeps the source's other CPU options. When anything is set, the step waits for the clone to finish (even if *Wait For Task Completion* is off) and then updates the clone's config.
+
+The available CPU models and machine versions depend on the node's Proxmox/QEMU version, so the dropdowns only hold the stable values. For an up-to-date list (for example to fill a dropdown in a Form), use `GetCPUTypes` / `GetMachineTypes` at runtime and pass the chosen `Name` / `ID` to `CustomType` / `Machine Version`.
 
 ### Delete Disk Data (`RemoveVMDisk`)
 When enabled, also deletes the underlying volume from storage after removing it from the VM config. Requires `Storage` and `Volume Name` inputs in addition to `Interface`.
@@ -220,6 +291,9 @@ This ZIP file can be uploaded directly to Decisions via **System > Administratio
 - The `FileName` field should be just the filename (e.g. `ubuntu-22.04.iso`), not the full path
 - The `Datastore` field should be the storage name (e.g. `local`), not the full volume reference
 - The module automatically prepends the `iso/` directory path
+
+### New CD Drive Doesn't Show Up in a Running VM
+IDE/SATA drives can't be added to or removed from a running VM. Proxmox saves the change as *pending* and applies it at the next shutdown and start (a reboot from inside the guest is not enough). Loading an ISO into an **existing** CD drive (`MountISO` reusing an empty drive, or with `Interface` set to an existing drive) and `UnmountISO` work immediately.
 
 ## License
 
