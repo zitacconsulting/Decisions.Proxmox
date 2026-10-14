@@ -45,7 +45,7 @@ public class RemoveCDROM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataPro
 
     public override OutcomeScenarioData[] OutcomeScenarios => new[]
     {
-        new OutcomeScenarioData("Done"),
+        new OutcomeScenarioData("Done", new DataDescription(typeof(bool), "Pending Restart")),
         new OutcomeScenarioData("Not Found"),
         new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")),
     };
@@ -64,20 +64,29 @@ public class RemoveCDROM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataPro
             client.Authenticate(credentials);
             if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
 
-            // Only touches CD drives; a disk on that interface is left alone
-            var existing = string.IsNullOrEmpty(iface) ? null : ProxmoxVMConfig.Drive(client.Get($"/nodes/{node}/qemu/{vmId}/config"), iface);
-            if (existing == null)
+            if (string.IsNullOrEmpty(iface))
                 return new ResultData("Not Found");
-            if (!ProxmoxVMConfig.IsCDROM(existing))
+
+            // Read current and pending values: on a running VM an earlier removal may still be
+            // waiting for a restart, and then counts as done rather than not found
+            var entry = client.GetPendingEntry(node!, vmId, iface);
+            var drive = entry?.CurrentValue ?? entry?.PendingValue;
+            if (entry == null || drive == null)
+                return new ResultData("Not Found");
+            if (!ProxmoxVMConfig.IsCDROM(drive))
                 return new ResultData("Error", new Dictionary<string, object> { { "Error Message", $"{iface} is a disk, not a CD drive." } });
 
-            // On a running VM Proxmox keeps this as a pending change until the VM is restarted
-            client.Put($"/nodes/{node}/qemu/{vmId}/config", new Dictionary<string, string>
+            if (!entry.PendingDelete)
             {
-                { "delete", iface! }
-            });
+                client.Put($"/nodes/{node}/qemu/{vmId}/config", new Dictionary<string, string>
+                {
+                    { "delete", iface }
+                });
+            }
 
-            return new ResultData("Done");
+            // On a running VM Proxmox keeps the removal pending until the VM is stopped and started
+            var pendingRestart = client.GetPendingEntry(node!, vmId, iface)?.HasPendingChange == true;
+            return new ResultData("Done", new Dictionary<string, object> { { "Pending Restart", pendingRestart } });
         }
         catch (Exception e)
         {

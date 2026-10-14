@@ -31,11 +31,12 @@ public class RemoveVMDisk : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataPr
     [PropertyClassification(1, "Port", new string[] { "Settings" })]
     public int Port { get { return port; } set { port = value; } }
 
+    // Permanently deletes the volume, the same way removing an unused disk does in the Proxmox GUI
     [PropertyClassification(2, "Delete Disk Data", new string[] { "Settings" })]
     public bool DeleteDiskData
     {
         get { return deleteDiskData; }
-        set { deleteDiskData = value; this.OnPropertyChanged("InputData"); }
+        set { deleteDiskData = value; this.OnPropertyChanged("OutcomeScenarios"); }
     }
 
     public IInputMapping[] DefaultInputs => new IInputMapping[]
@@ -43,36 +44,31 @@ public class RemoveVMDisk : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataPr
         new IgnoreInputMapping { InputDataName = "Node" },
     };
 
-    public DataDescription[] InputData
+    public DataDescription[] InputData => new[]
+    {
+        new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Hostname") { Categories = new string[] { "Connection" } },
+        useApiToken
+            ? new DataDescription((DecisionsType)new DecisionsNativeType(typeof(ApiTokenCredentials)), "Credentials") { Categories = new string[] { "Connection" } }
+            : new DataDescription((DecisionsType)new DecisionsNativeType(typeof(UsernamePasswordCredentials)), "Credentials") { Categories = new string[] { "Connection" } },
+        new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Node"),
+        new DataDescription((DecisionsType)new DecisionsNativeType(typeof(int)), "VM ID"),
+        new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Interface"),
+    };
+
+    public override OutcomeScenarioData[] OutcomeScenarios
     {
         get
         {
-            var inputs = new List<DataDescription>
+            var done = new List<DataDescription> { new DataDescription(typeof(bool), "Pending Restart") };
+            if (deleteDiskData) done.Add(new DataDescription(typeof(bool), "Disk Data Deleted"));
+            return new[]
             {
-                new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Hostname") { Categories = new string[] { "Connection" } },
-                useApiToken
-                    ? new DataDescription((DecisionsType)new DecisionsNativeType(typeof(ApiTokenCredentials)), "Credentials") { Categories = new string[] { "Connection" } }
-                    : new DataDescription((DecisionsType)new DecisionsNativeType(typeof(UsernamePasswordCredentials)), "Credentials") { Categories = new string[] { "Connection" } },
-                new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Node"),
-                new DataDescription((DecisionsType)new DecisionsNativeType(typeof(int)), "VM ID"),
-                new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Interface"),
+                new OutcomeScenarioData("Done", done.ToArray()),
+                new OutcomeScenarioData("Not Found"),
+                new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")),
             };
-
-            if (deleteDiskData)
-            {
-                inputs.Add(new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Storage"));
-                inputs.Add(new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Volume Name"));
-            }
-
-            return inputs.ToArray();
         }
     }
-
-    public override OutcomeScenarioData[] OutcomeScenarios => new[]
-    {
-        new OutcomeScenarioData("Done"),
-        new OutcomeScenarioData("Error", new DataDescription(typeof(string), "Error Message")),
-    };
 
     public ResultData Run(StepStartData data)
     {
@@ -80,7 +76,7 @@ public class RemoveVMDisk : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataPr
         var credentials = data.Data["Credentials"];
         var node = data.Data["Node"] as string;
         var vmId = (int)data.Data["VM ID"];
-        var iface = data.Data["Interface"] as string;
+        var iface = (data.Data["Interface"] as string)?.Trim().ToLowerInvariant();
 
         try
         {
@@ -88,23 +84,84 @@ public class RemoveVMDisk : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataPr
             client.Authenticate(credentials);
             if (string.IsNullOrEmpty(node)) node = client.FindNodeForVM(vmId);
 
-            client.Put($"/nodes/{node}/qemu/{vmId}/config", new Dictionary<string, string>
-            {
-                { "delete", iface! }
-            });
+            if (string.IsNullOrEmpty(iface))
+                return new ResultData("Not Found");
 
-            if (deleteDiskData)
+            // A disk detached earlier (e.g. after a pending removal was applied) is listed as unusedN.
+            // Removing that entry is what deletes the volume, so it's only allowed with Delete Disk Data.
+            if (System.Text.RegularExpressions.Regex.IsMatch(iface, @"^unused\d+$"))
             {
-                var storage = data.Data["Storage"] as string;
-                var volumeName = data.Data["Volume Name"] as string;
-                client.Delete($"/nodes/{node}/storage/{storage}/content/{storage}:{volumeName}");
+                if (!deleteDiskData)
+                    return Error($"Removing {iface} permanently deletes its data. Turn on Delete Disk Data to do that.");
+                var unused = client.GetPendingEntry(node!, vmId, iface)?.CurrentValue;
+                if (unused == null)
+                    return new ResultData("Not Found");
+                return new ResultData("Done", new Dictionary<string, object>
+                {
+                    { "Pending Restart", false },
+                    { "Disk Data Deleted", DeleteDetachedVolume(client, node!, vmId, ProxmoxVMConfig.VolumeRef(unused)) },
+                });
             }
 
-            return new ResultData("Done");
+            if (!ProxmoxVMConfig.IsDataDiskInterface(iface))
+                return Error($"{iface} is not a data disk (scsi, virtio, sata or ide). EFI disk and TPM state can't be removed with this step.");
+
+            // Current and pending values: a removal waiting for a restart isn't "not found"
+            var entry = client.GetPendingEntry(node!, vmId, iface);
+            var drive = entry?.CurrentValue ?? entry?.PendingValue;
+            if (entry == null || drive == null)
+                return new ResultData("Not Found");
+            if (ProxmoxVMConfig.IsCDROM(drive))
+                return Error($"{iface} is a CD drive. Use Remove CD-ROM instead.");
+
+            if (!entry.PendingDelete)
+            {
+                client.Put($"/nodes/{node}/qemu/{vmId}/config", new Dictionary<string, string>
+                {
+                    { "delete", iface }
+                });
+            }
+
+            // Disks that can't be hot-removed from a running VM stay attached until it's stopped and started
+            var pendingRestart = client.GetPendingEntry(node!, vmId, iface)?.CurrentValue != null;
+            var outputs = new Dictionary<string, object> { { "Pending Restart", pendingRestart } };
+
+            if (deleteDiskData)
+                outputs["Disk Data Deleted"] = !pendingRestart && DeleteDetachedVolume(client, node!, vmId, ProxmoxVMConfig.VolumeRef(drive));
+
+            return new ResultData("Done", outputs);
         }
         catch (Exception e)
         {
             return new ResultData("Error", new Dictionary<string, object> { { "Error Message", e.ToString() } });
         }
     }
+
+    // Never runs while the disk is still attached. Deleting the unusedN entry Proxmox created for it
+    // removes the volume and the config entry together. Passthrough devices (no volume) are skipped.
+    private static bool DeleteDetachedVolume(ProxmoxClient client, string node, int vmId, string? volumeRef)
+    {
+        if (volumeRef == null)
+            return false;
+
+        var config = client.Get($"/nodes/{node}/qemu/{vmId}/config?current=1");
+        var unusedKey = ProxmoxVMConfig.UnusedKeyFor(config, volumeRef);
+        if (unusedKey != null)
+        {
+            client.Put($"/nodes/{node}/qemu/{vmId}/config", new Dictionary<string, string> { { "delete", unusedKey } });
+
+            // Only report it deleted once the entry is really gone, not just marked for deletion
+            return client.GetPendingEntry(node, vmId, unusedKey)?.CurrentValue == null;
+        }
+        else
+        {
+            // Not kept as unused (shouldn't normally happen); the volume is detached, so delete it directly
+            var storage = volumeRef[..volumeRef.IndexOf(':')];
+            client.Delete($"/nodes/{node}/storage/{storage}/content/{Uri.EscapeDataString(volumeRef)}");
+        }
+        return true;
+    }
+
+    private static ResultData Error(string message) =>
+        new ResultData("Error", new Dictionary<string, object> { { "Error Message", message } });
 }

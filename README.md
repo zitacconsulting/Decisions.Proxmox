@@ -28,7 +28,7 @@ This module provides 37 Decisions workflow steps organized under `Integration/Pr
 - `GetVMByID` - Get a VM with full details by ID
 - `GetVMByName` - Get a VM with full details by name (`Multiple Found` outcome when names collide)
 - `CreateVM` - Create a new virtual machine with full hardware configuration
-- `DeleteVM` - Remove a virtual machine
+- `DeleteVM` - Remove a virtual machine and all its disks. Waits for the delete task (*Wait For Task Completion*), *Purge From Backup, Replication and HA Jobs* (on by default), *Destroy Unreferenced Disks* (also volumes with the VM's ID that aren't in its config), optional `Not Found` and `Still Running` outcomes (a running VM is never deleted)
 - `PowerOnVM` - Power on a virtual machine, optional `Already Running` outcome. *Wait For OS Boot* waits until the QEMU Guest Agent inside the guest answers (`Timeout` outcome after *OS Boot Timeout*); the agent must be enabled on the VM and installed in the guest.
 - `PowerOffVM` - Shut down a virtual machine (graceful by default, hard stop with Force Stop), optional `Not Running` outcome
 - `RebootVM` - Restart a virtual machine (full shutdown and start, so pending changes are applied). Same *Wait For OS Boot* option as `PowerOnVM`; it only counts an agent answer from after the reboot.
@@ -61,13 +61,13 @@ How scripts are passed: PowerShell with `-EncodedCommand` (about 12,000 characte
 - `GetVMDisks` - List disks configured on a VM
 - `AddVMDisk` - Add a disk to a VM
 - `ResizeVMDisk` - Resize an existing VM disk (increase only)
-- `RemoveVMDisk` - Remove a disk from a VM, optionally deleting the volume data
+- `RemoveVMDisk` - Remove a disk from a VM by `Interface`. With *Delete Disk Data* the volume is deleted too, the way removing an unused disk works in the Proxmox GUI; it is never deleted while still attached. Outputs: `Pending Restart` (the disk stays attached until the VM is stopped and started, so no data was deleted) and `Disk Data Deleted`. `Not Found` outcome. Refuses CD drives, the EFI disk and TPM state
 
 ### ISO Management
 - `GetAllISOs` - List all ISO files available in Proxmox storage
 - `MountISO` - Mount an ISO to a VM; returns a `ProxmoxCDROM`. Optional `Interface` (e.g. `ide2`): replaces the ISO in that CD drive, or creates a CD drive there if the slot is free. Ignored: loads the ISO into the first empty CD drive, otherwise adds a new drive in the first free IDE slot (`No Free Slot` when all four are used).
 - `UnmountISO` - Eject the ISO from a CD drive by `Interface`; the empty drive stays and is reused by `MountISO`
-- `RemoveCDROM` - Delete a CD drive by `Interface`
+- `RemoveCDROM` - Delete a CD drive by `Interface`. `Pending Restart` output: true when Proxmox keeps the removal pending until the VM is stopped and started (running VM); running it again then still returns `Done`
 
 ### Storage
 - `GetStorage` - List storage pools available on Proxmox nodes
@@ -220,7 +220,7 @@ Unset inputs and fields mean:
 The available CPU models and machine versions depend on the node's Proxmox/QEMU version, so the dropdowns only hold the stable values. For an up-to-date list (for example to fill a dropdown in a Form), use `GetCPUTypes` / `GetMachineTypes` at runtime and pass the chosen `Name` / `ID` to `CustomType` / `Machine Version`.
 
 ### Delete Disk Data (`RemoveVMDisk`)
-When enabled, also deletes the underlying volume from storage after removing it from the VM config. Requires `Storage` and `Volume Name` inputs in addition to `Interface`.
+When enabled, also deletes the disk's volume from storage once it is detached. The volume is read from the VM's config, so no Storage or Volume Name input is needed. If the removal is pending (running VM, disk not hot-removable), nothing is deleted and `Disk Data Deleted` is false. After the VM has been stopped and started, the disk is listed in the VM's config as `unused0`, `unused1`, …; run the step again with that as `Interface` to delete the data. Simplest: power off the VM before removing disks with data.
 
 ### Disk Bus (`AddVMDisk`)
 Property to select the bus type for new disks: `scsi` (default), `virtio`, `ide`, or `sata`.

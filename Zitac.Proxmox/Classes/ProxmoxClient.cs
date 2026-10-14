@@ -202,6 +202,25 @@ public class ProxmoxClient : IDisposable
         return new[] { exitStatus };
     }
 
+    // One entry from /config's pending list: a setting's current value, its pending value and
+    // whether it's marked for deletion. Changes that can't be applied to a running VM (e.g. adding
+    // or removing an IDE/SATA drive) wait there until the next full stop and start. Note that
+    // GET /config returns the pending view, so a drive marked for deletion is already missing there.
+    public PendingConfigEntry? GetPendingEntry(string node, int vmId, string key)
+    {
+        foreach (var entry in Get($"/nodes/{node}/qemu/{vmId}/pending").EnumerateArray())
+        {
+            if (ProxmoxJson.Str(entry, "key") != key) continue;
+            return new PendingConfigEntry
+            {
+                CurrentValue = ProxmoxJson.Str(entry, "value"),
+                PendingValue = ProxmoxJson.Str(entry, "pending"),
+                PendingDelete = (ProxmoxJson.Int(entry, "delete") ?? 0) != 0,
+            };
+        }
+        return null;
+    }
+
     public const string GuestAgentRequiredMessage =
         "Wait For OS Boot needs the QEMU Guest Agent: enable it on the VM (Create VM's 'Enable QEMU Agent') and install it in the guest.";
 

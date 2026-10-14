@@ -38,6 +38,23 @@ internal static class ProxmoxVMConfig
             .Select(p => ProxmoxNetworkInterface.Parse(p.key, p.raw))
             .ToArray();
 
+    public static bool IsDataDiskInterface(string interfaceName) => DriveKey.IsMatch(interfaceName);
+
+    // The volume reference of a drive line, e.g. "local-lvm:vm-100-disk-1" (null for passthrough devices)
+    public static string? VolumeRef(string raw)
+    {
+        var (positional, options) = ProxmoxJson.ParsePropertyString(raw);
+        var volume = positional.FirstOrDefault() ?? options.GetValueOrDefault("file");
+        return volume != null && volume.Contains(':') ? volume : null;
+    }
+
+    // A disk removed from the config is kept as unusedN; this finds the entry for a volume
+    public static string? UnusedKeyFor(JsonElement config, string volumeRef) =>
+        StringProperties(config)
+            .Where(p => Regex.IsMatch(p.key, @"^unused\d+$") && VolumeRef(p.raw) == volumeRef)
+            .Select(p => p.key)
+            .FirstOrDefault();
+
     // Buses Proxmox allows a CD drive on (not virtio)
     private static readonly Regex CDROMSlot = new(@"^(ide[0-3]|sata[0-5]|scsi([0-9]|[12][0-9]|30))$", RegexOptions.Compiled);
 
