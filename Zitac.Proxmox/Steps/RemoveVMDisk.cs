@@ -139,7 +139,7 @@ public class RemoveVMDisk : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataPr
 
     // Never runs while the disk is still attached. Deleting the unusedN entry Proxmox created for it
     // removes the volume and the config entry together. Passthrough devices (no volume) are skipped.
-    private static bool DeleteDetachedVolume(ProxmoxClient client, string node, int vmId, string? volumeRef)
+    internal static bool DeleteDetachedVolume(ProxmoxClient client, string node, int vmId, string? volumeRef)
     {
         if (volumeRef == null)
             return false;

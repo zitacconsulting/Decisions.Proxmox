@@ -66,9 +66,20 @@ public class UpdateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
     [PropertyClassification(new string[] { EfiCategory }, "EFI Disk Info", 0)]
     public string EfiNote
     {
-        get => "Only used when BIOS Type is set to OVMF_UEFI and the VM has no EFI disk yet: the step creates one. " +
-               "EFI Disk Storage ignored = the boot disk's storage. Pre-Enroll Keys ignored = keys enrolled (Secure Boot on), like the Proxmox GUI. " +
-               "An existing EFI disk is never changed.";
+        get => "A UEFI VM without an EFI disk gets one when BIOS Type is set to OVMF_UEFI or Pre-Enroll Keys is set. " +
+               "EFI Disk Storage ignored = the boot disk's storage. Pre-Enroll Keys ignored = keys enrolled (Secure Boot on), like the Proxmox GUI.";
+        set { }
+    }
+
+    // useInfoIcon: false shows the warning icon
+    [InfoOrWarningEditor(false, null, false)]
+    [PropertyClassification(new string[] { EfiCategory }, "EFI Disk Warning", 1)]
+    public string EfiWarning
+    {
+        get => "Changing Pre-Enroll Keys on a VM that already has an EFI disk deletes and recreates the EFI disk. " +
+               "All stored UEFI settings are lost: boot entries, boot order and Secure Boot keys. The guest usually still boots " +
+               "through its fallback boot loader, but Windows with BitLocker will likely ask for its recovery key. " +
+               "The VM must be stopped. Nothing happens when the value already matches (see SecureBootKeysEnrolled on the VM).";
         set { }
     }
 
@@ -189,19 +200,42 @@ public class UpdateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
             }
 
             if (biosType.HasValue)
-            {
                 config["bios"] = biosType == BiosType.OVMF_UEFI ? "ovmf" : "seabios";
 
-                // Without an EFI disk OVMF can't keep its settings (boot order, Secure Boot) across restarts.
-                // Switching back to SeaBIOS leaves the EFI disk alone, like the Proxmox GUI.
-                if (biosType == BiosType.OVMF_UEFI && !current.TryGetProperty("efidisk0", out _))
-                {
-                    var storage = !string.IsNullOrEmpty(efiStorage) ? efiStorage : BootDiskStorage(current);
-                    if (storage != null)
-                        config["efidisk0"] = $"{storage}:1,efitype=4m,pre-enrolled-keys={(preEnrollKeys ?? true ? 1 : 0)}";
-                    else
-                        warnings.Add("No EFI disk was created: set EFI Disk Storage, the VM has no disk on a storage to put it on.");
-                }
+            // EFI disk. Switching back to SeaBIOS leaves it alone, like the Proxmox GUI.
+            var replaceEfi = false;
+            string? replacedEfiVolume = null;
+            var uefi = biosType.HasValue ? biosType == BiosType.OVMF_UEFI : ProxmoxJson.Str(current, "bios") == "ovmf";
+            var currentEfi = ProxmoxJson.Str(current, "efidisk0");
+            if (uefi && currentEfi == null && (biosType.HasValue || preEnrollKeys.HasValue))
+            {
+                // Without an EFI disk OVMF can't keep its settings (boot order, Secure Boot) across restarts
+                var storage = !string.IsNullOrEmpty(efiStorage) ? efiStorage : BootDiskStorage(current);
+                if (storage != null)
+                    config["efidisk0"] = $"{storage}:1,efitype=4m,pre-enrolled-keys={(preEnrollKeys ?? true ? 1 : 0)}";
+                else
+                    warnings.Add("No EFI disk was created: set EFI Disk Storage, the VM has no disk on a storage to put it on.");
+            }
+            else if (uefi && currentEfi != null && preEnrollKeys.HasValue && ProxmoxVMConfig.EfiKeysEnrolled(currentEfi) != preEnrollKeys.Value)
+            {
+                // The keys are written into the EFI disk when it's created, so changing them means a new disk.
+                // Proxmox can't swap the EFI disk of a running VM.
+                var status = ProxmoxJson.Str(client.Get($"/nodes/{node}/qemu/{vmId}/status/current"), "status");
+                if (status != "stopped")
+                    return Error("Changing Pre-Enroll Keys recreates the EFI disk, which needs the VM to be stopped. Power off the VM first.");
+
+                replaceEfi = true;
+                replacedEfiVolume = ProxmoxVMConfig.VolumeRef(currentEfi);
+                var storage = !string.IsNullOrEmpty(efiStorage) ? efiStorage : replacedEfiVolume?[..replacedEfiVolume.IndexOf(':')];
+                if (storage == null)
+                    return Error("The current EFI disk isn't on a storage. Set EFI Disk Storage for the new one.");
+
+                // Keep the EFI type (2m/4m) and, while keys stay enrolled, the Microsoft 2023 certificate option
+                var options = ProxmoxJson.ParsePropertyString(currentEfi).options;
+                var newEfi = $"{storage}:1,efitype={options.GetValueOrDefault("efitype") ?? "4m"},pre-enrolled-keys={(preEnrollKeys.Value ? 1 : 0)}";
+                if (preEnrollKeys.Value && options.TryGetValue("ms-cert", out var msCert))
+                    newEfi += $",ms-cert={msCert}";
+                config["efidisk0"] = newEfi;
             }
 
             var cpuSettings = VMHardwareInputs.Cpu(data);
@@ -219,13 +253,18 @@ public class UpdateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
             delete.RemoveAll(config.ContainsKey);
             if (delete.Count > 0) config["delete"] = string.Join(",", delete);
 
+            // Detach the old EFI disk first (stopped VM, so it's applied at once and kept as unusedN);
+            // replacing it in the same call as the new one isn't reliable
+            if (replaceEfi)
+                PostConfig(client, node!, vmId, new Dictionary<string, string> { { "delete", "efidisk0" } }, warnings);
+
+            // POST (async) rather than PUT: creating an EFI disk allocates storage
             if (config.Count > 0)
-            {
-                // POST (async) rather than PUT: creating an EFI disk allocates storage
-                var upid = client.Post($"/nodes/{node}/qemu/{vmId}/config", config);
-                if (!string.IsNullOrEmpty(upid))
-                    warnings.AddRange(client.WaitForTask(node!, upid, taskTimeoutSeconds));
-            }
+                PostConfig(client, node!, vmId, config, warnings);
+
+            // Only once the new EFI disk is in place, so a failure above leaves the old one recoverable as unusedN
+            if (replacedEfiVolume != null && !RemoveVMDisk.DeleteDetachedVolume(client, node!, vmId, replacedEfiVolume))
+                warnings.Add($"The old EFI disk ({replacedEfiVolume}) was detached but not deleted; it's listed as unused on the VM.");
 
             var pending = PendingKeys(client, node!, vmId);
             var vm = ProxmoxVM.Load(client, node!, vmId);
@@ -248,6 +287,16 @@ public class UpdateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
             return new ResultData("Error", new Dictionary<string, object> { { "Error Message", e.ToString() } });
         }
     }
+
+    private void PostConfig(ProxmoxClient client, string node, int vmId, Dictionary<string, string> config, List<string> warnings)
+    {
+        var upid = client.Post($"/nodes/{node}/qemu/{vmId}/config", config);
+        if (!string.IsNullOrEmpty(upid))
+            warnings.AddRange(client.WaitForTask(node, upid, taskTimeoutSeconds));
+    }
+
+    private static ResultData Error(string message) =>
+        new ResultData("Error", new Dictionary<string, object> { { "Error Message", message } });
 
     // Keeps the agent's other options (type, fstrim_cloned_disks, ...); only "enabled" changes
     private static string AgentConfig(string? existing, bool enabled)

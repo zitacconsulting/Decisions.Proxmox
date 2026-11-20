@@ -25,6 +25,10 @@ internal static class ProxmoxVMConfig
         return positional.FirstOrDefault() == "1" || options.GetValueOrDefault("enabled") == "1";
     }
 
+    // pre-enrolled-keys on an efidisk0 line; Proxmox treats a missing option as 0
+    public static bool EfiKeysEnrolled(string efidisk) =>
+        ProxmoxJson.ParsePropertyString(efidisk).options.GetValueOrDefault("pre-enrolled-keys") == "1";
+
     // A VM has a virtual TPM exactly when tpmstate0 exists; there's no separate on/off setting
     public static bool HasTPM(JsonElement config) => config.TryGetProperty("tpmstate0", out _);
 

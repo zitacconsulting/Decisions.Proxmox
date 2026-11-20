@@ -128,9 +128,7 @@ public class ProxmoxVM
         UEFI = BIOS == "ovmf";
         TPMEnabled = ProxmoxVMConfig.HasTPM(config);
         var efidisk = ProxmoxJson.Str(config, "efidisk0");
-        SecureBootKeysEnrolled = efidisk == null
-            ? null
-            : ProxmoxJson.ParsePropertyString(efidisk).options.GetValueOrDefault("pre-enrolled-keys") == "1";
+        SecureBootKeysEnrolled = efidisk == null ? null : ProxmoxVMConfig.EfiKeysEnrolled(efidisk);
         SCSIController = ScsiControllerExtensions.FromProxmox(ProxmoxJson.Str(config, "scsihw"));
         MachineType = ProxmoxJson.Str(config, "machine") ?? "i440fx";
         StartOnBoot = ProxmoxJson.Bool(config, "onboot") ?? false;
