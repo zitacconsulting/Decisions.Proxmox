@@ -28,6 +28,9 @@ public class ProxmoxVM
     [DataMember] public bool UEFI { get; set; }
     [DataMember] public bool TPMEnabled { get; set; }
 
+    // pre-enrolled-keys on efidisk0; null when the VM has no EFI disk (SeaBIOS, or OVMF without one)
+    [DataMember] public bool? SecureBootKeysEnrolled { get; set; }
+
     // Controller model for all SCSI disks (Disks with Bus = scsi); Proxmox has no per-disk controller
     [DataMember] public ScsiController SCSIController { get; set; }
     [DataMember] public string? MachineType { get; set; }
@@ -124,6 +127,10 @@ public class ProxmoxVM
         BIOS = ProxmoxJson.Str(config, "bios") ?? "seabios";
         UEFI = BIOS == "ovmf";
         TPMEnabled = ProxmoxVMConfig.HasTPM(config);
+        var efidisk = ProxmoxJson.Str(config, "efidisk0");
+        SecureBootKeysEnrolled = efidisk == null
+            ? null
+            : ProxmoxJson.ParsePropertyString(efidisk).options.GetValueOrDefault("pre-enrolled-keys") == "1";
         SCSIController = ScsiControllerExtensions.FromProxmox(ProxmoxJson.Str(config, "scsihw"));
         MachineType = ProxmoxJson.Str(config, "machine") ?? "i440fx";
         StartOnBoot = ProxmoxJson.Bool(config, "onboot") ?? false;

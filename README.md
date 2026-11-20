@@ -21,13 +21,14 @@
 
 ## Features
 
-This module provides 37 Decisions workflow steps organized under `Integration/Proxmox`:
+This module provides 38 Decisions workflow steps organized under `Integration/Proxmox`:
 
 ### Virtual Machine Lifecycle
 - `GetAllVMs` - List all virtual machines in the cluster (or on one node), with optional extended info (disks, CD-ROMs, NICs, guest agent)
 - `GetVMByID` - Get a VM with full details by ID
 - `GetVMByName` - Get a VM with full details by name (`Multiple Found` outcome when names collide)
 - `CreateVM` - Create a new virtual machine with full hardware configuration
+- `UpdateVM` - Change an existing VM's settings: name, OS type, BIOS (adds an EFI disk when switching to UEFI), SCSI controller, start on boot, QEMU agent, description, tags, CPU, memory, machine type or any other setting. Ignored inputs keep the current value; returns the VM plus the changes still waiting for a restart
 - `DeleteVM` - Remove a virtual machine and all its disks. Waits for the delete task (*Wait For Task Completion*), *Purge From Backup, Replication and HA Jobs* (on by default), *Destroy Unreferenced Disks* (also volumes with the VM's ID that aren't in its config), optional `Not Found` and `Still Running` outcomes (a running VM is never deleted)
 - `PowerOnVM` - Power on a virtual machine, optional `Already Running` outcome. *Wait For OS Boot* waits until the QEMU Guest Agent inside the guest answers (`Timeout` outcome after *OS Boot Timeout*); the agent must be enabled on the VM and installed in the guest.
 - `PowerOffVM` - Shut down a virtual machine (graceful by default, hard stop with Force Stop), optional `Not Running` outcome
@@ -97,6 +98,7 @@ The Proxmox user or API token requires appropriate privileges for intended opera
 - `VM.Config.Network` — add/remove/update network interfaces
 - `VM.Config.CDROM` — mount/unmount ISO images
 - `VM.Allocate` — create and delete VMs
+- `VM.Config.Options`, `VM.Config.CPU`, `VM.Config.Memory`, `VM.Config.HWType` — `UpdateVM` (and the hardware settings on `CloneVM`)
 - `VM.Clone` — clone VMs
 - `VM.Snapshot` — create, delete, and revert snapshots
 - `Datastore.Audit` — list storage and ISO files
@@ -127,7 +129,7 @@ Integration > Proxmox > [Category]
 
 ## Available Steps
 
-All 37 steps follow a consistent pattern:
+All 38 steps follow a consistent pattern:
 - **Node input is optional** on all VM/container steps — the module auto-discovers the correct node from the VM ID when left blank
 - **Connection** inputs (Hostname, Credentials) are grouped in a dedicated section
 - **Error** outcome on every step returns a descriptive error message string
@@ -173,7 +175,7 @@ Returned by `GetVMByID`, `GetVMByName`, `GetAllVMs` and `CreateVM`. Field names 
 | `Locked`, `LockedBy`, `LockedByDetail` | `Locked` is true while an operation holds the VM and config changes are refused. `LockedBy` enum: `None`, `Backup`, `Clone`, `Create`, `Migrate`, `Snapshot`, `SnapshotDelete`, `Rollback`, `Hibernating`, `Hibernated`, `Other`. `LockedByDetail` is the raw Proxmox lock name. |
 | `OSType`, `BIOS`, `MachineType`, `UUID` | Proxmox `ostype` code (`l26`, `win11`, ...), `seabios`/`ovmf`, machine type, SMBIOS UUID |
 | `SCSIController` | Controller model for all SCSI disks: `VirtIOScsiPci`, `VirtIOScsiSingle`, `LSI` (Proxmox default), `LSI53C810`, `MegaRAID`, `ParaVirtual`. Proxmox has one per VM; disks aren't attached to a controller individually. |
-| `UEFI`, `TPMEnabled` | `UEFI` = BIOS is `ovmf`. `TPMEnabled` = the VM has a virtual TPM (`tpmstate0`). |
+| `UEFI`, `TPMEnabled`, `SecureBootKeysEnrolled` | `UEFI` = BIOS is `ovmf`. `TPMEnabled` = the VM has a virtual TPM (`tpmstate0`). `SecureBootKeysEnrolled` = the EFI disk (`efidisk0`) has the Secure Boot keys pre-enrolled; null when the VM has no EFI disk. |
 | `CPUSockets`, `CPUCores`, `CPUs`, `CPUType`, `CPUUsagePercent` | `CPUs` is the total vCPU count |
 | `MemoryMB`, `MemoryUsedMB`, `BalloonMinMB` | Configured, currently used, and balloon minimum (0 = ballooning off) |
 | `UptimeSeconds` | |
@@ -184,8 +186,8 @@ Returned by `GetVMByID`, `GetVMByName`, `GetAllVMs` and `CreateVM`. Field names 
 
 `ProxmoxContainer` (from `GetAllContainers`) uses the same naming: `PowerState` (same enum: Running, Stopped or Unknown), `PowerStateDetail`, `CPUs`, `CPUUsagePercent`, `MemoryMB`, `MemoryUsedMB`, `DiskSizeGB`, `DiskUsedGB`, `UptimeSeconds`, `Template`, `Tags[]`, `Locked`, `LockedBy`, `LockedByDetail` (container-only locks such as `disk`, `fstrim` or `mounted` show as `Other`).
 
-### CPU, Memory, Machine Type and Extra Config (`CreateVM`, `CloneVM`)
-On **Create VM**, `CPU` and `Memory` start as *Build Data* with `Sockets` = 1, `Cores` = 1 and `MemoryMB` = 2048 (the Proxmox GUI defaults) and every other field ignored. Those three fields and the two inputs themselves are required: the designer flags the step if they are ignored or null, and the step goes to *Error* if they are empty or 0 at runtime. On **Clone VM** everything is optional and ignored by default.
+### CPU, Memory, Machine Type and Extra Config (`CreateVM`, `CloneVM`, `UpdateVM`)
+On **Create VM**, `CPU` and `Memory` start as *Build Data* with `Sockets` = 1, `Cores` = 1 and `MemoryMB` = 2048 (the Proxmox GUI defaults) and every other field ignored. Those three fields and the two inputs themselves are required: the designer flags the step if they are ignored or null, and the step goes to *Error* if they are empty or 0 at runtime. On **Clone VM** and **Update VM** everything is optional and ignored by default.
 
 **CPU** (`ProxmoxCPUSettings`), matching the Processor dialog in the Proxmox GUI:
 
@@ -215,9 +217,22 @@ On **Create VM**, `CPU` and `Memory` start as *Build Data* with `Sockets` = 1, `
 
 Unset inputs and fields mean:
 - **Create VM**: Proxmox defaults (ballooning on, i440fx) and CPU type `x86-64-v2-AES`, the same default the Proxmox GUI uses. The API on its own would fall back to `kvm64`, so the step sends it explicitly.
+- **Update VM**: the VM keeps its current values. Changing `Type`/`CustomType`/`Flags` keeps the VM's other CPU options.
 - **Clone VM**: the clone keeps the source VM's values. Changing `Type`/`CustomType`/`Flags` keeps the source's other CPU options. When anything is set, the step waits for the clone to finish (even if *Wait For Task Completion* is off) and then updates the clone's config.
 
 The available CPU models and machine versions depend on the node's Proxmox/QEMU version, so the dropdowns only hold the stable values. For an up-to-date list (for example to fill a dropdown in a Form), use `GetCPUTypes` / `GetMachineTypes` at runtime and pass the chosen `Name` / `ID` to `CustomType` / `Machine Version`.
+
+### Pre-Enroll Keys (`CreateVM`)
+Only used when *BIOS Type* is `OVMF_UEFI`: sets `pre-enrolled-keys` on the EFI disk the step creates. Ignored by default, which enrolls the keys like the Proxmox GUI does. True enrolls the distribution and Microsoft Secure Boot keys, so Secure Boot is on from the first boot. False leaves them out, so Secure Boot is off (e.g. for unsigned boot loaders). Ignored for SeaBIOS. It can't be changed on an existing VM without recreating the EFI disk, which also wipes its stored UEFI variables.
+
+### Update VM (`UpdateVM`)
+Sets the same VM-level settings as Create VM. Disks, network interfaces and ISOs have their own steps (`AddVMDisk`/`ResizeVMDisk`/`RemoveVMDisk`, `UpdateVMNetwork`, `MountISO`). Every input is ignored by default, and ignored means "keep the current value".
+
+- **Description**, **Tags**: mapped but empty clears the value. A blank **VM Name** is skipped.
+- **Enable QEMU Agent**: only changes `enabled`; other agent options (`type`, `fstrim_cloned_disks`, ...) are kept.
+- **BIOS Type** = `OVMF_UEFI` on a VM without an EFI disk also creates one, on *EFI Disk Storage* (ignored = the storage of the first disk in the boot order) with *Pre-Enroll Keys* (ignored = enrolled). An existing EFI disk is never changed, and switching back to SeaBIOS leaves it in place, like the Proxmox GUI. If no storage can be found, the VM is switched without an EFI disk and a warning is returned.
+- **Running VMs**: changes Proxmox can't hot-plug (CPU type, sockets, BIOS, machine type, SCSI controller, EFI disk, ...) wait until the VM is fully stopped and started (`RebootVM`, or `PowerOffVM` + `PowerOnVM`; a reboot from inside the guest is not enough). `Restart Required` and `Pending Changes` (the config keys, e.g. `bios`, `cpu`) show what's waiting, including pending changes made before the step ran. The returned `VM` shows the pending values.
+- Proxmox needs `VM.Config.Options`, `VM.Config.CPU`, `VM.Config.Memory` and `VM.Config.HWType` for the respective settings, plus `Datastore.AllocateSpace` on the storage when an EFI disk is created.
 
 ### Delete Disk Data (`RemoveVMDisk`)
 When enabled, also deletes the disk's volume from storage once it is detached. The volume is read from the VM's config, so no Storage or Volume Name input is needed. If the removal is pending (running VM, disk not hot-removable), nothing is deleted and `Disk Data Deleted` is false. After the VM has been stopped and started, the disk is listed in the VM's config as `unused0`, `unused1`, …; run the step again with that as `Interface` to delete the data. Simplest: power off the VM before removing disks with data.

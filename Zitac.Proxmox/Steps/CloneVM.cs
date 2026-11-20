@@ -91,7 +91,7 @@ public class CloneVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduce
         new IgnoreInputMapping { InputDataName = "New VM ID" },
         new IgnoreInputMapping { InputDataName = "Target Node" },
         new IgnoreInputMapping { InputDataName = "Target Storage" },
-    }.Concat(VMHardwareInputs.CloneDefaultInputs()).ToArray();
+    }.Concat(VMHardwareInputs.OptionalHardwareDefaultInputs()).ToArray();
 
     public DataDescription[] InputData => new[]
     {

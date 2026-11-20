@@ -6,7 +6,7 @@ using DecisionsFramework.Design.Flow.Mapping.InputImpl;
 
 namespace Zitac.Proxmox.Steps;
 
-// CPU / Memory / Machine Type / Extra Config inputs shared by Create VM and Clone VM.
+// CPU / Memory / Machine Type / Extra Config inputs shared by Create VM, Clone VM and Update VM.
 // An ignored input or field reads as null.
 internal static class VMHardwareInputs
 {
@@ -35,12 +35,21 @@ internal static class VMHardwareInputs
         "CustomType overrides Type, e.g. EPYC-Genoa or custom-mymodel (list them with Get CPU Types). " +
         "Changing Type or Flags keeps the source's other CPU options. Flags e.g. +aes;-pcid.";
 
+    public const string UpdateCpuNote =
+        "CPU: all fields are optional, unset fields keep the VM's current value. " +
+        "CustomType overrides Type, e.g. EPYC-Genoa or custom-mymodel (list them with Get CPU Types). " +
+        "Changing Type or Flags keeps the VM's other CPU options. Flags e.g. +aes;-pcid.";
+
     public const string CreateMemoryNote =
         "Memory: MemoryMB is required. BalloonMinMB = minimum memory with ballooning (0 = ballooning off). " +
         "Shares = auto-ballooning weight (default 1000, 0 = no auto-ballooning).";
 
     public const string CloneMemoryNote =
         "Memory: all fields are optional, unset fields keep the source VM's value. " +
+        "BalloonMinMB 0 = ballooning off. Shares 0 = no auto-ballooning.";
+
+    public const string UpdateMemoryNote =
+        "Memory: all fields are optional, unset fields keep the VM's current value. " +
         "BalloonMinMB 0 = ballooning off. Shares 0 = no auto-ballooning.";
 
     public const string MachineNote =
@@ -56,6 +65,11 @@ internal static class VMHardwareInputs
     public const string CloneApplyNote =
         "Setting any CPU, Memory, Machine or Extra Config value makes the step wait for the clone to finish, " +
         "even when Wait For Task Completion is off, and then applies it to the new VM.";
+
+    public const string UpdateApplyNote =
+        "Ignored inputs keep the VM's current value. On a running VM, changes that can't be hot-plugged " +
+        "(e.g. CPU type, BIOS, machine type, SCSI controller) wait until the VM is fully stopped and started " +
+        "(Reboot VM or Power Off + Power On); they are listed in the Pending Changes output.";
 
     // Create VM: CPU and Memory start as "Build Data" with the required fields set to the
     // Proxmox GUI defaults and the optional fields ignored.
@@ -78,8 +92,8 @@ internal static class VMHardwareInputs
             Ignore(nameof(ProxmoxMemorySettings.Shares))),
     }.Concat(OptionalDefaultInputs());
 
-    // Clone VM: everything is optional, unset means "keep the source VM's value"
-    public static IEnumerable<IInputMapping> CloneDefaultInputs() => new IInputMapping[]
+    // Clone VM / Update VM: everything is optional, unset means "keep the source/current value"
+    public static IEnumerable<IInputMapping> OptionalHardwareDefaultInputs() => new IInputMapping[]
     {
         Ignore(CpuInput),
         Ignore(MemoryInput),

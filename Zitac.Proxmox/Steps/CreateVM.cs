@@ -84,6 +84,7 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         new IgnoreInputMapping { InputDataName = "Tags" },
         new ConstantInputMapping { InputDataName = "OS Type", Value = OsType.Linux_6x_2_6_Kernel },
         new ConstantInputMapping { InputDataName = "BIOS Type", Value = BiosType.SeaBIOS },
+        new IgnoreInputMapping { InputDataName = "Pre-Enroll Keys" },
         new ConstantInputMapping { InputDataName = "Network Model", Value = NetworkModel.VirtIO },
         new ConstantInputMapping { InputDataName = "SCSI Controller", Value = ScsiController.VirtIOScsiPci },
         new ConstantInputMapping { InputDataName = "Network Bridge", Value = "vmbr0" },
@@ -102,6 +103,8 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "VM Name"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(OsType)), "OS Type"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(BiosType)), "BIOS Type"),
+        // Only used with OVMF_UEFI; ignored = keys enrolled, like the Proxmox GUI. Always listed because BIOS Type can be mapped at runtime
+        new DataDescription((DecisionsType)new DecisionsNativeType(typeof(bool)), "Pre-Enroll Keys"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(string)), "Storage"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(int)), "Disk Size (GB)"),
         new DataDescription((DecisionsType)new DecisionsNativeType(typeof(ScsiController)), "SCSI Controller"),
@@ -137,6 +140,7 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
         var vmName = data.Data["VM Name"] as string;
         var osType = (OsType)(data.Data["OS Type"] ?? OsType.Linux_6x_2_6_Kernel);
         var biosType = (BiosType)(data.Data["BIOS Type"] ?? BiosType.SeaBIOS);
+        var preEnrollKeys = data.Data["Pre-Enroll Keys"] as bool?;
         var storage = data.Data["Storage"] as string;
         var diskSizeGb = data.Data["Disk Size (GB)"] as int? ?? 32;
         var scsiController = (ScsiController)(data.Data["SCSI Controller"] ?? ScsiController.VirtIOScsiPci);
@@ -173,7 +177,7 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
             {
                 { "vmid",    vmId.ToString() },
                 { "name",    vmName! },
-                { "ostype",  MapOsType(osType) },
+                { "ostype",  osType.ToProxmox() },
                 { "bios",    biosType == BiosType.OVMF_UEFI ? "ovmf" : "seabios" },
                 { "scsihw",  scsiController.ToProxmox() },
                 { "scsi0",   $"{storage}:{diskSizeGb}" },
@@ -192,8 +196,9 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
             if (machine != null)
                 postData["machine"] = machine;
 
+            // Pre-enrolled keys = distribution + Microsoft Secure Boot keys, so Secure Boot is on from first boot
             if (biosType == BiosType.OVMF_UEFI)
-                postData["efidisk0"] = $"{storage}:1,efitype=4m,pre-enrolled-keys=1";
+                postData["efidisk0"] = $"{storage}:1,efitype=4m,pre-enrolled-keys={(preEnrollKeys ?? true ? 1 : 0)}";
 
             var validISOs = isoImages?
                 .Where(i => i != null && !string.IsNullOrEmpty(i.Datastore) && !string.IsNullOrEmpty(i.FileName))
@@ -239,21 +244,4 @@ public class CreateVM : BaseFlowAwareStep, ISyncStep, IDataConsumer, IDataProduc
             return new ResultData("Error", new Dictionary<string, object> { { "Error Message", e.ToString() } });
         }
     }
-
-    private static string MapOsType(OsType osType) => osType switch
-    {
-        OsType.Linux_6x_2_6_Kernel    => "l26",
-        OsType.Linux_2_4_Kernel       => "l24",
-        OsType.Windows_11_2022_2025   => "win11",
-        OsType.Windows_10_2016_2019   => "win10",
-        OsType.Windows_8x_2012_2012R2 => "win8",
-        OsType.Windows_7_2008R2       => "win7",
-        OsType.Windows_Vista_2008     => "w2k8",
-        OsType.Windows_XP_2003        => "wxp",
-        OsType.Windows_2000           => "w2k",
-        OsType.Solaris_Kernel         => "solaris",
-        _                             => "other",
-    };
-
-
 }
